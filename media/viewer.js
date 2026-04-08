@@ -1,6 +1,104 @@
 (function () {
 	'use strict';
 
+	function formatExposureTime(val) {
+		if (val == null) return null;
+		if (val >= 1) return val + 's';
+		var denom = Math.round(1 / val);
+		return '1/' + denom + 's';
+	}
+
+	function formatFNumber(val) {
+		if (val == null) return null;
+		return 'f/' + (Number.isInteger(val) ? val + '.0' : val);
+	}
+
+	function formatFocalLength(val) {
+		if (val == null) return null;
+		return (Number.isInteger(val) ? val : val.toFixed(1)) + 'mm';
+	}
+
+	function formatDate(val) {
+		if (val == null) return null;
+		if (val instanceof Date) {
+			return val.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+		}
+		if (typeof val === 'string') return val;
+		return null;
+	}
+
+	function populateMetadata(meta) {
+		var infoEl = document.getElementById('camera-info');
+		var rawEl = document.getElementById('metadata-content');
+
+		// Raw JSON for power users
+		rawEl.textContent = JSON.stringify(meta, null, 2);
+
+		if (!meta || Object.keys(meta).length === 0) {
+			infoEl.innerHTML = '<div class="info-row"><span class="info-label">No metadata available</span></div>';
+			return;
+		}
+
+		var fields = [];
+
+		// Camera
+		var camera = [meta.Make, meta.Model].filter(Boolean).join(' ');
+		// Avoid duplicating make in model (e.g. "Canon Canon EOS R5")
+		if (meta.Make && meta.Model && meta.Model.indexOf(meta.Make) === 0) {
+			camera = meta.Model;
+		}
+		if (camera) fields.push(['Camera', camera]);
+
+		// Lens
+		var lens = meta.LensModel || meta.Lens || meta.LensInfo;
+		if (lens) fields.push(['Lens', typeof lens === 'string' ? lens : String(lens)]);
+
+		// Focal length
+		var fl = formatFocalLength(meta.FocalLength);
+		if (fl) fields.push(['Focal Length', fl]);
+
+		// Aperture
+		var fn = formatFNumber(meta.FNumber);
+		if (fn) fields.push(['Aperture', fn]);
+
+		// Shutter speed
+		var ss = formatExposureTime(meta.ExposureTime);
+		if (ss) fields.push(['Shutter Speed', ss]);
+
+		// ISO
+		var iso = meta.ISO;
+		if (iso != null) fields.push(['ISO', 'ISO ' + iso]);
+
+		// Exposure compensation
+		var ec = meta.ExposureCompensation;
+		if (ec != null && ec !== 0) fields.push(['Exp. Comp.', (ec > 0 ? '+' : '') + ec + ' EV']);
+
+		// White balance
+		var wb = meta.WhiteBalance;
+		if (wb != null) fields.push(['White Balance', wb === 0 ? 'Auto' : typeof wb === 'string' ? wb : 'Manual']);
+
+		// Date
+		var date = formatDate(meta.DateTimeOriginal || meta.CreateDate || meta.ModifyDate);
+		if (date) fields.push(['Date', date]);
+
+		// Software
+		if (meta.Software) fields.push(['Software', meta.Software]);
+
+		if (fields.length === 0) {
+			infoEl.innerHTML = '<div class="info-row"><span class="info-label">No camera info found</span></div>';
+			return;
+		}
+
+		var html = '';
+		for (var i = 0; i < fields.length; i++) {
+			html += '<div class="info-row">' +
+				'<span class="info-label">' + fields[i][0] + '</span>' +
+				'<span class="info-value">' + fields[i][1] + '</span>' +
+				'</div>';
+		}
+		infoEl.innerHTML = html;
+	}
+
 	// --- Message handler: receive data from extension, switch from loading to viewer ---
 	window.addEventListener('message', function (event) {
 		var msg = event.data;
@@ -17,7 +115,7 @@
 				infoText += ' (preview ' + msg.width + ' &times; ' + msg.height + ')';
 			}
 			document.getElementById('image-info').innerHTML = infoText;
-			document.getElementById('metadata-content').textContent = JSON.stringify(msg.metadata, null, 2);
+			populateMetadata(msg.metadata);
 			initViewer();
 		} else if (msg.type === 'error') {
 			document.getElementById('loading-container').style.display = 'none';

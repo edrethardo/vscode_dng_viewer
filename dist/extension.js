@@ -4700,7 +4700,9 @@ var DngPreviewProvider = class {
 				<img id="preview-image" alt="DNG Preview" draggable="false">
 			</div>
 			<div class="metadata-panel" id="metadata-panel" style="display:none;">
-				<h3>EXIF Metadata</h3>
+				<h3>Camera Info</h3>
+				<div id="camera-info" class="camera-info"></div>
+				<h3>All Metadata</h3>
 				<pre id="metadata-content"></pre>
 			</div>
 		</div>
