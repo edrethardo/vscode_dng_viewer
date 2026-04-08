@@ -208,3 +208,8 @@ body.error {
 	word-break: break-all;
 	opacity: 0.7;
 }
+
+
+[hidden] {
+	display: none !important;
+}
