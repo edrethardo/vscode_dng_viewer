@@ -1,6 +1,11 @@
 (function () {
 	'use strict';
 
+	function setHidden(el, hidden) {
+		if (!el) return;
+		el.hidden = !!hidden;
+	}
+
 	function formatExposureTime(val) {
 		if (val == null) return null;
 		if (val >= 1) return val + 's';
@@ -35,7 +40,16 @@
 		rawEl.textContent = JSON.stringify(meta, null, 2);
 
 		if (!meta || Object.keys(meta).length === 0) {
-			infoEl.innerHTML = '<div class="info-row"><span class="info-label">No metadata available</span></div>';
+			if (infoEl) {
+				infoEl.replaceChildren();
+				var emptyRow = document.createElement('div');
+				emptyRow.className = 'info-row';
+				var emptyLabel = document.createElement('span');
+				emptyLabel.className = 'info-label';
+				emptyLabel.textContent = 'No metadata available';
+				emptyRow.appendChild(emptyLabel);
+				infoEl.appendChild(emptyRow);
+			}
 			return;
 		}
 
@@ -84,45 +98,62 @@
 		// Software
 		if (meta.Software) fields.push(['Software', meta.Software]);
 
+		if (!infoEl) return;
+
+		infoEl.replaceChildren();
 		if (fields.length === 0) {
-			infoEl.innerHTML = '<div class="info-row"><span class="info-label">No camera info found</span></div>';
+			var noneRow = document.createElement('div');
+			noneRow.className = 'info-row';
+			var noneLabel = document.createElement('span');
+			noneLabel.className = 'info-label';
+			noneLabel.textContent = 'No camera info found';
+			noneRow.appendChild(noneLabel);
+			infoEl.appendChild(noneRow);
 			return;
 		}
 
-		var html = '';
 		for (var i = 0; i < fields.length; i++) {
-			html += '<div class="info-row">' +
-				'<span class="info-label">' + fields[i][0] + '</span>' +
-				'<span class="info-value">' + fields[i][1] + '</span>' +
-				'</div>';
+			var row = document.createElement('div');
+			row.className = 'info-row';
+
+			var label = document.createElement('span');
+			label.className = 'info-label';
+			label.textContent = String(fields[i][0]);
+
+			var value = document.createElement('span');
+			value.className = 'info-value';
+			value.textContent = String(fields[i][1]);
+
+			row.appendChild(label);
+			row.appendChild(value);
+			infoEl.appendChild(row);
 		}
-		infoEl.innerHTML = html;
 	}
 
 	// --- Message handler: receive data from extension, switch from loading to viewer ---
 	window.addEventListener('message', function (event) {
 		var msg = event.data;
 		if (msg.type === 'loaded') {
-			document.getElementById('loading-container').style.display = 'none';
+			setHidden(document.getElementById('loading-container'), true);
 			document.body.classList.remove('loading');
 			var viewer = document.getElementById('viewer-container');
-			viewer.style.display = '';
+			setHidden(viewer, false);
 			document.getElementById('preview-image').src = msg.jpegDataUri;
 			var origW = msg.originalWidth || msg.width;
 			var origH = msg.originalHeight || msg.height;
-			var infoText = origW + ' &times; ' + origH;
+			var infoText = origW + ' × ' + origH;
 			if (origW !== msg.width || origH !== msg.height) {
-				infoText += ' (preview ' + msg.width + ' &times; ' + msg.height + ')';
+				infoText += ' (preview ' + msg.width + ' × ' + msg.height + ')';
 			}
-			document.getElementById('image-info').innerHTML = infoText;
+			document.getElementById('image-info').textContent = infoText;
 			populateMetadata(msg.metadata);
 			initViewer();
 		} else if (msg.type === 'error') {
-			document.getElementById('loading-container').style.display = 'none';
+			setHidden(document.getElementById('loading-container'), true);
 			document.body.classList.remove('loading');
 			document.body.classList.add('error');
 			var errEl = document.getElementById('error-container');
-			errEl.style.display = '';
+			setHidden(errEl, false);
 			document.getElementById('error-message').textContent = msg.message;
 		}
 	});
@@ -241,8 +272,8 @@
 
 	// --- EXIF toggle ---
 	btnMeta.addEventListener('click', function () {
-		var visible = metaPanel.style.display !== 'none';
-		metaPanel.style.display = visible ? 'none' : 'flex';
+		var visible = !metaPanel.hidden;
+		setHidden(metaPanel, visible);
 		btnMeta.classList.toggle('active', !visible);
 	});
 

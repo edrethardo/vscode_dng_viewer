@@ -113,12 +113,12 @@ export class DngPreviewProvider implements vscode.CustomReadonlyEditorProvider<D
 		<p>Decoding DNG file...</p>
 	</div>
 
-	<div class="error-container" id="error-container" style="display:none;">
+	<div class="error-container" id="error-container" hidden>
 		<h2>Failed to decode DNG file</h2>
 		<p id="error-message"></p>
 	</div>
 
-	<div id="viewer-container" style="display:none;">
+	<div id="viewer-container" hidden>
 		<div class="toolbar">
 			<button id="btn-zoom-fit" title="Fit to window">Fit</button>
 			<button id="btn-zoom-100" title="Actual size (100%)">100%</button>
@@ -134,7 +134,7 @@ export class DngPreviewProvider implements vscode.CustomReadonlyEditorProvider<D
 			<div class="image-container" id="image-container">
 				<img id="preview-image" alt="DNG Preview" draggable="false">
 			</div>
-			<div class="metadata-panel" id="metadata-panel" style="display:none;">
+			<div class="metadata-panel" id="metadata-panel" hidden>
 				<h3>Camera Info</h3>
 				<div id="camera-info" class="camera-info"></div>
 				<h3>All Metadata</h3>
