@@ -31,7 +31,11 @@ console.log('\n=== Building MODERN variant ===\n');
 
 const modernPkg = JSON.parse(pkgOriginal);
 modernPkg.engines.vscode = '^1.86.0';
-// Keep everything: customEditors + commands + menus
+// Remove previewFolder (legacy-only command via HTTP server)
+modernPkg.activationEvents = modernPkg.activationEvents.filter(e => e !== 'onCommand:dngViewer.previewFolder');
+modernPkg.contributes.commands = modernPkg.contributes.commands.filter(c => c.command !== 'dngViewer.previewFolder');
+modernPkg.contributes.menus['explorer/context'] = modernPkg.contributes.menus['explorer/context'].filter(m => m.command !== 'dngViewer.previewFolder');
+modernPkg.contributes.menus.commandPalette = modernPkg.contributes.menus.commandPalette.filter(m => m.command !== 'dngViewer.previewFolder');
 writePkg(modernPkg);
 
 // Bundle with the standard entry point
