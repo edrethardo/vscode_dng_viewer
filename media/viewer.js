@@ -98,10 +98,15 @@
 		updateTransform();
 	}
 
-	function zoomActual() {
-		translateX = 0;
-		translateY = 0;
-		setScale(1);
+	function zoomActual(centerX, centerY) {
+		if (centerX !== undefined && centerY !== undefined) {
+			// Zoom to 100% centered on the clicked point
+			setScale(1, centerX, centerY);
+		} else {
+			translateX = 0;
+			translateY = 0;
+			setScale(1);
+		}
 	}
 
 	// --- Toolbar buttons ---
@@ -128,8 +133,8 @@
 	container.addEventListener('mousedown', function (e) {
 		var isMiddle = e.button === 1;
 		if (fitMode && !isMiddle) {
-			// Left-click in fit mode → go to 100%
-			zoomActual();
+			// Left-click in fit mode → zoom to 100% centered on click point
+			zoomActual(e.clientX, e.clientY);
 			return;
 		}
 		if (!fitMode || isMiddle) {
@@ -185,9 +190,9 @@
 	});
 
 	// --- Double-click to toggle fit/100% ---
-	container.addEventListener('dblclick', function () {
+	container.addEventListener('dblclick', function (e) {
 		if (fitMode) {
-			zoomActual();
+			zoomActual(e.clientX, e.clientY);
 		} else {
 			fitToWindow();
 		}
