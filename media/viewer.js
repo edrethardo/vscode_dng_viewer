@@ -1,24 +1,160 @@
 (function () {
 	'use strict';
 
+	function setHidden(el, hidden) {
+		if (!el) return;
+		el.hidden = !!hidden;
+	}
+
+	function formatExposureTime(val) {
+		if (val == null) return null;
+		if (val >= 1) return val + 's';
+		var denom = Math.round(1 / val);
+		return '1/' + denom + 's';
+	}
+
+	function formatFNumber(val) {
+		if (val == null) return null;
+		return 'f/' + (Number.isInteger(val) ? val + '.0' : val);
+	}
+
+	function formatFocalLength(val) {
+		if (val == null) return null;
+		return (Number.isInteger(val) ? val : val.toFixed(1)) + 'mm';
+	}
+
+	function formatDate(val) {
+		if (val == null) return null;
+		if (val instanceof Date) {
+			return val.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+		}
+		if (typeof val === 'string') return val;
+		return null;
+	}
+
+	function populateMetadata(meta) {
+		var infoEl = document.getElementById('camera-info');
+		var rawEl = document.getElementById('metadata-content');
+
+		if (!meta || Object.keys(meta).length === 0) {
+			if (rawEl) rawEl.textContent = '';
+			if (infoEl) {
+				infoEl.replaceChildren();
+				var emptyRow = document.createElement('div');
+				emptyRow.className = 'info-row';
+				var emptyLabel = document.createElement('span');
+				emptyLabel.className = 'info-label';
+				emptyLabel.textContent = 'No metadata available';
+				emptyRow.appendChild(emptyLabel);
+				infoEl.appendChild(emptyRow);
+			}
+			return;
+		}
+
+		// Raw JSON for power users
+		if (rawEl) rawEl.textContent = JSON.stringify(meta, null, 2) || '';
+
+		var fields = [];
+
+		// Camera
+		var camera = [meta.Make, meta.Model].filter(Boolean).join(' ');
+		// Avoid duplicating make in model (e.g. "Canon Canon EOS R5")
+		if (meta.Make && meta.Model && meta.Model.indexOf(meta.Make) === 0) {
+			camera = meta.Model;
+		}
+		if (camera) fields.push(['Camera', camera]);
+
+		// Lens
+		var lens = meta.LensModel || meta.Lens || meta.LensInfo;
+		if (lens) fields.push(['Lens', typeof lens === 'string' ? lens : String(lens)]);
+
+		// Focal length
+		var fl = formatFocalLength(meta.FocalLength);
+		if (fl) fields.push(['Focal Length', fl]);
+
+		// Aperture
+		var fn = formatFNumber(meta.FNumber);
+		if (fn) fields.push(['Aperture', fn]);
+
+		// Shutter speed
+		var ss = formatExposureTime(meta.ExposureTime);
+		if (ss) fields.push(['Shutter Speed', ss]);
+
+		// ISO
+		var iso = meta.ISO;
+		if (iso != null) fields.push(['ISO', 'ISO ' + iso]);
+
+		// Exposure compensation
+		var ec = meta.ExposureCompensation;
+		if (ec != null && ec !== 0) fields.push(['Exp. Comp.', (ec > 0 ? '+' : '') + ec + ' EV']);
+
+		// White balance
+		var wb = meta.WhiteBalance;
+		if (wb != null) fields.push(['White Balance', wb === 0 ? 'Auto' : typeof wb === 'string' ? wb : 'Manual']);
+
+		// Date
+		var date = formatDate(meta.DateTimeOriginal || meta.CreateDate || meta.ModifyDate);
+		if (date) fields.push(['Date', date]);
+
+		// Software
+		if (meta.Software) fields.push(['Software', meta.Software]);
+
+		if (!infoEl) return;
+
+		infoEl.replaceChildren();
+		if (fields.length === 0) {
+			var noneRow = document.createElement('div');
+			noneRow.className = 'info-row';
+			var noneLabel = document.createElement('span');
+			noneLabel.className = 'info-label';
+			noneLabel.textContent = 'No camera info found';
+			noneRow.appendChild(noneLabel);
+			infoEl.appendChild(noneRow);
+			return;
+		}
+
+		for (var i = 0; i < fields.length; i++) {
+			var row = document.createElement('div');
+			row.className = 'info-row';
+
+			var label = document.createElement('span');
+			label.className = 'info-label';
+			label.textContent = String(fields[i][0]);
+
+			var value = document.createElement('span');
+			value.className = 'info-value';
+			value.textContent = String(fields[i][1]);
+
+			row.appendChild(label);
+			row.appendChild(value);
+			infoEl.appendChild(row);
+		}
+	}
+
 	// --- Message handler: receive data from extension, switch from loading to viewer ---
 	window.addEventListener('message', function (event) {
 		var msg = event.data;
 		if (msg.type === 'loaded') {
-			document.getElementById('loading-container').style.display = 'none';
+			setHidden(document.getElementById('loading-container'), true);
 			document.body.classList.remove('loading');
 			var viewer = document.getElementById('viewer-container');
-			viewer.style.display = '';
+			setHidden(viewer, false);
 			document.getElementById('preview-image').src = msg.jpegDataUri;
-			document.getElementById('image-info').innerHTML = msg.width + ' &times; ' + msg.height;
-			document.getElementById('metadata-content').textContent = JSON.stringify(msg.metadata, null, 2);
+			var origW = msg.originalWidth || msg.width;
+			var origH = msg.originalHeight || msg.height;
+			var infoText = origW + ' × ' + origH;
+			if (origW !== msg.width || origH !== msg.height) {
+				infoText += ' (preview ' + msg.width + ' × ' + msg.height + ')';
+			}
+			document.getElementById('image-info').textContent = infoText;
+			populateMetadata(msg.metadata);
 			initViewer();
 		} else if (msg.type === 'error') {
-			document.getElementById('loading-container').style.display = 'none';
+			setHidden(document.getElementById('loading-container'), true);
 			document.body.classList.remove('loading');
 			document.body.classList.add('error');
 			var errEl = document.getElementById('error-container');
-			errEl.style.display = '';
+			setHidden(errEl, false);
 			document.getElementById('error-message').textContent = msg.message;
 		}
 	});
@@ -92,10 +228,41 @@
 		updateTransform();
 	}
 
-	function zoomActual() {
-		translateX = 0;
-		translateY = 0;
-		setScale(1);
+	function zoomActual(centerX, centerY) {
+		if (centerX !== undefined && centerY !== undefined && fitMode) {
+			// Transitioning from fit mode: CSS max-width/max-height scaling
+			// means the stored scale (1) doesn't reflect the actual visual scale.
+			// Compute translate from the image's rendered position directly.
+			var imgRect = img.getBoundingClientRect();
+			var containerRect = container.getBoundingClientRect();
+
+			// Normalized click position within the displayed image (0 to 1)
+			var nx = Math.max(0, Math.min(1, (centerX - imgRect.left) / imgRect.width));
+			var ny = Math.max(0, Math.min(1, (centerY - imgRect.top) / imgRect.height));
+
+			// Click position relative to the container
+			var cx = centerX - containerRect.left;
+			var cy = centerY - containerRect.top;
+
+			// In non-fit mode the image is centered by flexbox at natural size.
+			// Element top-left (before transform) relative to container:
+			var elemLeft = (containerRect.width - img.naturalWidth) / 2;
+			var elemTop = (containerRect.height - img.naturalHeight) / 2;
+
+			// Set translate so the clicked image point stays at the click position
+			fitMode = false;
+			scale = 1;
+			translateX = cx - elemLeft - nx * img.naturalWidth;
+			translateY = cy - elemTop - ny * img.naturalHeight;
+			updateTransform();
+		} else if (centerX !== undefined && centerY !== undefined) {
+			// Already in zoom mode: use ratio-based focal point math
+			setScale(1, centerX, centerY);
+		} else {
+			translateX = 0;
+			translateY = 0;
+			setScale(1);
+		}
 	}
 
 	// --- Toolbar buttons ---
@@ -106,8 +273,8 @@
 
 	// --- EXIF toggle ---
 	btnMeta.addEventListener('click', function () {
-		var visible = metaPanel.style.display !== 'none';
-		metaPanel.style.display = visible ? 'none' : 'flex';
+		var visible = !metaPanel.hidden;
+		setHidden(metaPanel, visible);
 		btnMeta.classList.toggle('active', !visible);
 	});
 
@@ -122,8 +289,8 @@
 	container.addEventListener('mousedown', function (e) {
 		var isMiddle = e.button === 1;
 		if (fitMode && !isMiddle) {
-			// Left-click in fit mode → go to 100%
-			zoomActual();
+			// Left-click in fit mode → zoom to 100% centered on click point
+			zoomActual(e.clientX, e.clientY);
 			return;
 		}
 		if (!fitMode || isMiddle) {
@@ -179,9 +346,9 @@
 	});
 
 	// --- Double-click to toggle fit/100% ---
-	container.addEventListener('dblclick', function () {
+	container.addEventListener('dblclick', function (e) {
 		if (fitMode) {
-			zoomActual();
+			zoomActual(e.clientX, e.clientY);
 		} else {
 			fitToWindow();
 		}

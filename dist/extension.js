@@ -3095,9 +3095,9 @@ var require_decoder = __commonJS({
         return a < 0 ? 0 : a > 255 ? 255 : a;
       }
       constructor.prototype = {
-        load: function load(path2) {
+        load: function load(path3) {
           var xhr = new XMLHttpRequest();
-          xhr.open("GET", path2, true);
+          xhr.open("GET", path3, true);
           xhr.responseType = "arraybuffer";
           xhr.onload = (function() {
             var data = new Uint8Array(xhr.response || xhr.mozResponseArrayBuffer);
@@ -3663,17 +3663,30 @@ var require_jpeg_js = __commonJS({
   }
 });
 
-// src/extension-legacy.ts
-var extension_legacy_exports = {};
-__export(extension_legacy_exports, {
+// src/extension.ts
+var extension_exports = {};
+__export(extension_exports, {
   activate: () => activate,
   deactivate: () => deactivate
 });
-module.exports = __toCommonJS(extension_legacy_exports);
+module.exports = __toCommonJS(extension_exports);
+var vscode5 = __toESM(require("vscode"));
+var path2 = __toESM(require("path"));
+
+// src/dngPreviewProvider.ts
 var vscode2 = __toESM(require("vscode"));
-var path = __toESM(require("path"));
-var fs2 = __toESM(require("fs"));
-var http = __toESM(require("http"));
+
+// src/dngDocument.ts
+var DngDocument = class {
+  constructor(uri) {
+    this._disposables = [];
+    this.uri = uri;
+  }
+  dispose() {
+    this._disposables.forEach((d) => d.dispose());
+    this._disposables.length = 0;
+  }
+};
 
 // src/dngDecoder.ts
 var vscode = __toESM(require("vscode"));
@@ -4261,11 +4274,15 @@ async function tryExifrThumbnail(filePath) {
     const meta = await exifr.parse(filePath, true);
     const jpeg = require_jpeg_js();
     const decoded = jpeg.decode(Buffer.from(thumbBuf), { useTArray: true, formatAsRGBA: false });
+    const origWidth = meta?.ImageWidth ?? meta?.ExifImageWidth ?? decoded.width;
+    const origHeight = meta?.ImageHeight ?? meta?.ExifImageHeight ?? decoded.height;
     return {
       jpegBuffer: Buffer.from(thumbBuf),
       metadata: meta || {},
       width: decoded.width,
-      height: decoded.height
+      height: decoded.height,
+      originalWidth: origWidth,
+      originalHeight: origHeight
     };
   } catch {
     return null;
@@ -4356,12 +4373,12 @@ function parsePpm(buf) {
 async function tryDecode(dcraw, filePath, halfSize, useCameraWb) {
   const fs3 = require("fs");
   const os = require("os");
-  const path2 = require("path");
+  const path3 = require("path");
   const isDcrawEmu = dcraw.includes("dcraw_emu");
   if (isDcrawEmu) {
-    const tmpDir = fs3.mkdtempSync(path2.join(os.tmpdir(), "dng-"));
-    const baseName = path2.basename(filePath);
-    const tmpInput = path2.join(tmpDir, baseName);
+    const tmpDir = fs3.mkdtempSync(path3.join(os.tmpdir(), "dng-"));
+    const baseName = path3.basename(filePath);
+    const tmpInput = path3.join(tmpDir, baseName);
     try {
       fs3.copyFileSync(filePath, tmpInput);
       const args = [];
@@ -4396,7 +4413,7 @@ async function tryDecode(dcraw, filePath, halfSize, useCameraWb) {
       if (files.length === 0) {
         return null;
       }
-      const ppmBuffer = fs3.readFileSync(path2.join(tmpDir, files[0]));
+      const ppmBuffer = fs3.readFileSync(path3.join(tmpDir, files[0]));
       return { ppmBuffer, stderr: stderrText };
     } catch {
       return null;
@@ -4404,7 +4421,7 @@ async function tryDecode(dcraw, filePath, halfSize, useCameraWb) {
       try {
         const entries = fs3.readdirSync(tmpDir);
         for (const e of entries) {
-          fs3.unlinkSync(path2.join(tmpDir, e));
+          fs3.unlinkSync(path3.join(tmpDir, e));
         }
         fs3.rmdirSync(tmpDir);
       } catch {
@@ -4462,13 +4479,25 @@ async function fullDecode(filePath) {
       "No raw decoder found on your system.\nInstall one of:\n  Linux:   sudo apt install libraw-bin   (or dcraw)\n  macOS:   brew install libraw   (or dcraw)\n  Windows: download dcraw from https://www.dechifro.org/dcraw/"
     );
   }
+  let origWidth = 0, origHeight = 0;
+  let exifMetadata = {};
+  try {
+    const exifr = await Promise.resolve().then(() => __toESM(require_full_umd()));
+    const meta = await exifr.parse(filePath, true);
+    if (meta) {
+      exifMetadata = meta;
+      origWidth = meta.ImageWidth ?? meta.ExifImageWidth ?? 0;
+      origHeight = meta.ImageHeight ?? meta.ExifImageHeight ?? 0;
+    }
+  } catch {
+  }
   const errors = [];
   for (const tool of tools) {
     const result = await tryDecode(tool, filePath, halfSize, useCameraWb);
     if (result && result.ppmBuffer.length > 0) {
       try {
         const { width, height, pixels } = parsePpm(result.ppmBuffer);
-        return await encodePpmToResult(filePath, pixels, width, height, previewMaxWidth);
+        return encodePpmToResult(pixels, width, height, previewMaxWidth, exifMetadata, origWidth || width, origHeight || height);
       } catch (e) {
         errors.push(`${tool}: PPM parse failed \u2014 ${e instanceof Error ? e.message : e}`);
       }
@@ -4479,7 +4508,7 @@ async function fullDecode(filePath) {
   try {
     const direct = decodeDngDirect(filePath, demosaicMode === "full");
     if (direct) {
-      return await encodePpmToResult(filePath, direct.pixels, direct.width, direct.height, previewMaxWidth);
+      return encodePpmToResult(direct.pixels, direct.width, direct.height, previewMaxWidth, exifMetadata, origWidth || direct.width, origHeight || direct.height);
     }
     errors.push("direct JS decoder: format not supported");
   } catch (e) {
@@ -4527,7 +4556,7 @@ function downsampleRgb(pixels, width, height, maxWidth) {
   }
   return { pixels: out, width: newW, height: newH };
 }
-async function encodePpmToResult(filePath, pixels, width, height, maxWidth) {
+function encodePpmToResult(pixels, width, height, maxWidth, metadata, originalWidth, originalHeight) {
   const limit = maxWidth ?? 1e3;
   const ds = downsampleRgb(pixels, width, height, limit);
   const jpeg = require_jpeg_js();
@@ -4539,17 +4568,13 @@ async function encodePpmToResult(filePath, pixels, width, height, maxWidth) {
     rgbaData[j + 3] = 255;
   }
   const encoded = jpeg.encode({ data: rgbaData, width: ds.width, height: ds.height }, 90);
-  let metadata = {};
-  try {
-    const exifr = await Promise.resolve().then(() => __toESM(require_full_umd()));
-    metadata = await exifr.parse(filePath, true) || {};
-  } catch {
-  }
   return {
     jpegBuffer: Buffer.from(encoded.data),
-    metadata,
+    metadata: metadata || {},
     width: ds.width,
-    height: ds.height
+    height: ds.height,
+    originalWidth: originalWidth ?? width,
+    originalHeight: originalHeight ?? height
   };
 }
 async function decodeDng(filePath) {
@@ -4560,191 +4585,258 @@ async function decodeDng(filePath) {
   return fullDecode(filePath);
 }
 
-// src/extension-legacy.ts
-function activate(context) {
-  const tempFiles = [];
-  let activeServer = null;
-  function findDngFiles(dir) {
-    const dngs = [];
-    const entries = fs2.readdirSync(dir, { withFileTypes: true });
-    for (const entry of entries) {
-      const fullPath = path.join(dir, entry.name);
-      if (entry.isDirectory()) {
-        dngs.push(...findDngFiles(fullPath));
-      } else if (entry.isFile() && /\.(dng|DNG)$/.test(entry.name)) {
-        dngs.push(fullPath);
-      }
-    }
-    return dngs;
+// src/dngPreviewProvider.ts
+var DngPreviewProvider = class {
+  static {
+    this.viewType = "dngViewer.preview";
   }
-  context.subscriptions.push(
-    vscode2.commands.registerCommand("dngViewer.open", async (uri) => {
-      if (!uri) {
-        const uris = await vscode2.window.showOpenDialog({
-          canSelectMany: false,
-          filters: { "DNG Files": ["dng", "DNG"] }
-        });
-        if (!uris || uris.length === 0) {
-          return;
-        }
-        uri = uris[0];
+  constructor(context) {
+    this._context = context;
+    this._extensionUri = context.extensionUri;
+  }
+  async openCustomDocument(uri) {
+    return new DngDocument(uri);
+  }
+  async resolveCustomEditor(document2, webviewPanel, _token) {
+    webviewPanel.webview.options = {
+      enableScripts: true,
+      enableForms: false,
+      localResourceRoots: [
+        vscode2.Uri.joinPath(this._extensionUri, "media")
+      ]
+    };
+    webviewPanel.webview.html = this._getHtml(webviewPanel.webview);
+    await this._decodeAndPost(document2, webviewPanel);
+    const fileName = document2.uri.path.split("/").pop() || "*";
+    const dirUri = vscode2.Uri.joinPath(document2.uri, "..");
+    const watcher = vscode2.workspace.createFileSystemWatcher(
+      new vscode2.RelativePattern(dirUri, fileName)
+    );
+    watcher.onDidChange(async () => {
+      document2.jpegDataUri = void 0;
+      await this._decodeAndPost(document2, webviewPanel);
+    });
+    webviewPanel.onDidDispose(() => watcher.dispose());
+  }
+  async _decodeAndPost(document2, webviewPanel) {
+    try {
+      if (!document2.jpegDataUri) {
+        const result = await decodeDng(document2.uri.fsPath);
+        document2.jpegDataUri = `data:image/jpeg;base64,${result.jpegBuffer.toString("base64")}`;
+        document2.metadata = result.metadata;
+        document2.width = result.width;
+        document2.height = result.height;
+        document2.originalWidth = result.originalWidth;
+        document2.originalHeight = result.originalHeight;
       }
-      try {
-        const result = await vscode2.window.withProgress(
-          { location: vscode2.ProgressLocation.Notification, title: "Decoding DNG..." },
-          async () => {
-            return await decodeDng(uri.fsPath);
-          }
-        );
-        if (activeServer) {
-          activeServer.close();
-          activeServer = null;
-        }
-        const baseName = path.basename(uri.fsPath, path.extname(uri.fsPath));
-        const jpegBuf = result.jpegBuffer;
-        const metaJson = JSON.stringify(result.metadata, null, 2);
-        const server = http.createServer((req, res) => {
-          if (req.url === "/image.jpg") {
-            res.writeHead(200, { "Content-Type": "image/jpeg", "Content-Length": String(jpegBuf.length) });
-            res.end(jpegBuf);
-          } else {
-            const html = `<!DOCTYPE html>
-<html><head><meta charset="utf-8"><title>${baseName} \u2014 DNG Preview</title>
-<style>
-	body { margin: 0; background: #1e1e1e; color: #ccc; font-family: system-ui; display: flex; flex-direction: column; height: 100vh; }
-	.toolbar { padding: 8px 16px; background: #252526; border-bottom: 1px solid #333; display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
-	.toolbar button { background: #0e639c; color: #fff; border: none; padding: 4px 12px; border-radius: 3px; cursor: pointer; }
-	.toolbar button:hover { background: #1177bb; }
-	.toolbar .info { font-size: 13px; opacity: 0.7; }
-	.container { flex: 1; overflow: auto; display: flex; justify-content: center; align-items: center; }
-	.container img { max-width: 100%; max-height: 100%; object-fit: contain; }
-	.meta { display: none; position: fixed; right: 0; top: 40px; bottom: 0; width: 350px; background: #252526; border-left: 1px solid #333; overflow: auto; padding: 12px; font-size: 12px; }
-	.meta.visible { display: block; }
-	.meta pre { white-space: pre-wrap; word-break: break-all; }
-</style></head><body>
-<div class="toolbar">
-	<span><strong>${baseName}.dng</strong></span>
-	<span class="info">${result.width} \xD7 ${result.height}</span>
-	<button onclick="document.querySelector('.meta').classList.toggle('visible')">EXIF</button>
-</div>
-<div class="container"><img src="/image.jpg" alt="${baseName}"></div>
-<div class="meta"><pre>${metaJson.replace(/</g, "&lt;")}</pre></div>
-</body></html>`;
-            res.writeHead(200, { "Content-Type": "text/html" });
-            res.end(html);
-          }
-        });
-        activeServer = server;
-        await new Promise((resolve, reject) => {
-          server.listen(0, "127.0.0.1", async () => {
-            try {
-              const addr = server.address();
-              const localUri = vscode2.Uri.parse(`http://127.0.0.1:${addr.port}/`);
-              const externalUri = await vscode2.env.asExternalUri(localUri);
-              await vscode2.env.openExternal(externalUri);
-              resolve();
-            } catch (e) {
-              reject(e);
-            }
+      webviewPanel.webview.postMessage({
+        type: "loaded",
+        jpegDataUri: document2.jpegDataUri,
+        metadata: document2.metadata,
+        width: document2.width,
+        height: document2.height,
+        originalWidth: document2.originalWidth,
+        originalHeight: document2.originalHeight
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      webviewPanel.webview.postMessage({
+        type: "error",
+        message
+      });
+    }
+  }
+  _getNonce() {
+    const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    let nonce = "";
+    for (let i = 0; i < 32; i++) {
+      nonce += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+    return nonce;
+  }
+  _getHtml(webview) {
+    const styleUri = webview.asWebviewUri(
+      vscode2.Uri.joinPath(this._extensionUri, "media", "viewer.css")
+    );
+    const scriptUri = webview.asWebviewUri(
+      vscode2.Uri.joinPath(this._extensionUri, "media", "viewer.js")
+    );
+    const nonce = this._getNonce();
+    return (
+      /* html */
+      `<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${webview.cspSource} data:; style-src ${webview.cspSource}; style-src-attr 'unsafe-inline'; script-src 'nonce-${nonce}';">
+	<link href="${styleUri}" rel="stylesheet">
+</head>
+<body class="loading">
+	<div class="loading-container" id="loading-container">
+		<div class="spinner"></div>
+		<p>Decoding DNG file...</p>
+	</div>
+
+	<div class="error-container" id="error-container" hidden>
+		<h2>Failed to decode DNG file</h2>
+		<p id="error-message"></p>
+	</div>
+
+	<div id="viewer-container" hidden>
+		<div class="toolbar">
+			<button id="btn-zoom-fit" title="Fit to window">Fit</button>
+			<button id="btn-zoom-100" title="Actual size (100%)">100%</button>
+			<button id="btn-zoom-in" title="Zoom in">+</button>
+			<button id="btn-zoom-out" title="Zoom out">&minus;</button>
+			<span id="zoom-level" class="zoom-level">100%</span>
+			<span class="separator"></span>
+			<span class="image-info" id="image-info"></span>
+			<span class="separator"></span>
+			<button id="btn-toggle-meta" title="Toggle EXIF metadata">EXIF</button>
+		</div>
+		<div class="content">
+			<div class="image-container" id="image-container">
+				<img id="preview-image" alt="DNG Preview" draggable="false">
+			</div>
+			<div class="metadata-panel" id="metadata-panel" hidden>
+				<h3>Camera Info</h3>
+				<div id="camera-info" class="camera-info"></div>
+				<h3>All Metadata</h3>
+				<pre id="metadata-content"></pre>
+			</div>
+		</div>
+	</div>
+
+	<script nonce="${nonce}" src="${scriptUri}"></script>
+</body>
+</html>`
+    );
+  }
+};
+
+// src/folderPreview.ts
+var fs2 = __toESM(require("fs"));
+var http = __toESM(require("http"));
+var path = __toESM(require("path"));
+var vscode3 = __toESM(require("vscode"));
+function findDngFiles(dir) {
+  const dngs = [];
+  const entries = fs2.readdirSync(dir, { withFileTypes: true });
+  for (const entry of entries) {
+    const fullPath = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      dngs.push(...findDngFiles(fullPath));
+    } else if (entry.isFile() && /\.(dng|DNG)$/.test(entry.name)) {
+      dngs.push(fullPath);
+    }
+  }
+  return dngs;
+}
+function escapeHtml(text) {
+  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+function escapeAttr(text) {
+  return escapeHtml(text).replace(/"/g, "&quot;");
+}
+function registerPreviewFolderCommand() {
+  let activeServer = null;
+  const command = vscode3.commands.registerCommand("dngViewer.previewFolder", async (uri) => {
+    let folderPath;
+    if (uri) {
+      folderPath = uri.fsPath;
+      if (!fs2.statSync(folderPath).isDirectory()) {
+        folderPath = path.dirname(folderPath);
+      }
+    } else {
+      const uris = await vscode3.window.showOpenDialog({
+        canSelectMany: false,
+        canSelectFolders: true,
+        canSelectFiles: false
+      });
+      if (!uris || uris.length === 0) {
+        return;
+      }
+      folderPath = uris[0].fsPath;
+    }
+    try {
+      const dngFiles = findDngFiles(folderPath);
+      if (dngFiles.length === 0) {
+        vscode3.window.showWarningMessage(`No DNG files found in ${path.basename(folderPath)}`);
+        return;
+      }
+      if (activeServer) {
+        activeServer.close();
+        activeServer = null;
+      }
+      const decodeCache = /* @__PURE__ */ new Map();
+      const server = http.createServer(async (req, res) => {
+        const url = new URL(`http://localhost${req.url ?? "/"}`);
+        const filePath = url.searchParams.get("file");
+        if (req.url === "/decode-all") {
+          res.writeHead(200, {
+            "Content-Type": "text/event-stream",
+            "Cache-Control": "no-cache",
+            Connection: "keep-alive"
           });
-          server.on("error", reject);
-        });
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        vscode2.window.showErrorMessage(`DNG Viewer: ${message}`);
-      }
-    })
-  );
-  context.subscriptions.push(
-    vscode2.commands.registerCommand("dngViewer.previewFolder", async (uri) => {
-      let folderPath;
-      if (uri) {
-        folderPath = uri.fsPath;
-        if (!fs2.statSync(folderPath).isDirectory()) {
-          folderPath = path.dirname(folderPath);
-        }
-      } else {
-        const uris = await vscode2.window.showOpenDialog({
-          canSelectMany: false,
-          canSelectFolders: true,
-          canSelectFiles: false
-        });
-        if (!uris || uris.length === 0) {
-          return;
-        }
-        folderPath = uris[0].fsPath;
-      }
-      try {
-        const dngFiles = findDngFiles(folderPath);
-        if (dngFiles.length === 0) {
-          vscode2.window.showWarningMessage(`No DNG files found in ${path.basename(folderPath)}`);
-          return;
-        }
-        if (activeServer) {
-          activeServer.close();
-          activeServer = null;
-        }
-        const decodeCache = /* @__PURE__ */ new Map();
-        const server = http.createServer(async (req, res) => {
-          const url = new URL(`http://localhost${req.url}`);
-          const filePath = url.searchParams.get("file");
-          if (req.url === "/decode-all") {
-            res.writeHead(200, {
-              "Content-Type": "text/event-stream",
-              "Cache-Control": "no-cache",
-              "Connection": "keep-alive"
-            });
-            const concurrency = 3;
-            const queue = [...dngFiles];
-            let queueIdx = 0;
-            let inProgress = 0;
-            let completed = 0;
-            const processNext = async () => {
-              if (queueIdx >= queue.length) {
-                return;
+          const concurrency = 3;
+          let queueIdx = 0;
+          let inProgress = 0;
+          let completed = 0;
+          const processNext = async () => {
+            if (queueIdx >= dngFiles.length) {
+              return;
+            }
+            inProgress++;
+            const currentFile = dngFiles[queueIdx++];
+            try {
+              if (!decodeCache.has(currentFile)) {
+                const result = await decodeDng(currentFile);
+                decodeCache.set(currentFile, {
+                  jpeg: result.jpegBuffer,
+                  width: result.width,
+                  height: result.height,
+                  metadata: result.metadata
+                });
               }
-              inProgress++;
-              const fPath = queue[queueIdx++];
-              try {
-                if (!decodeCache.has(fPath)) {
-                  const result = await decodeDng(fPath);
-                  decodeCache.set(fPath, {
-                    jpeg: result.jpegBuffer,
-                    width: result.width,
-                    height: result.height,
-                    metadata: result.metadata
-                  });
-                }
-              } catch (e) {
-              }
-              completed++;
-              res.write(`data: {"file":"${JSON.stringify(fPath).slice(1, -1)}","completed":${completed},"total":${dngFiles.length}}
+            } catch {
+            }
+            completed++;
+            res.write(`data: ${JSON.stringify({ file: currentFile, completed, total: dngFiles.length })}
 
 `);
-              inProgress--;
-              if (queueIdx < queue.length) {
-                processNext();
-              } else if (inProgress === 0) {
-                res.write('data: {"done":true}\n\n');
-                res.end();
-              }
-            };
-            for (let i = 0; i < Math.min(concurrency, queue.length); i++) {
-              processNext();
+            inProgress--;
+            if (queueIdx < dngFiles.length) {
+              void processNext();
+            } else if (inProgress === 0) {
+              res.write(`data: ${JSON.stringify({ done: true })}
+
+`);
+              res.end();
             }
-            req.on("close", () => res.end());
-            return;
+          };
+          for (let i = 0; i < Math.min(concurrency, dngFiles.length); i++) {
+            void processNext();
           }
-          if (filePath && decodeCache.has(filePath)) {
-            const cached = decodeCache.get(filePath);
-            if (url.searchParams.get("image") === "1") {
-              res.writeHead(200, { "Content-Type": "image/jpeg", "Content-Length": String(cached.jpeg.length) });
-              res.end(cached.jpeg);
-            } else {
-              const baseN = path.basename(filePath, ".dng").replace(/</g, "&lt;");
-              const metaJson = JSON.stringify(cached.metadata, null, 2);
-              const html2 = `<!DOCTYPE html>
-<html><head><meta charset="utf-8"><title>${baseN} \u2014 DNG Preview</title>
+          req.on("close", () => {
+            if (!res.writableEnded) {
+              res.end();
+            }
+          });
+          return;
+        }
+        if (filePath && decodeCache.has(filePath)) {
+          const cached = decodeCache.get(filePath);
+          if (url.searchParams.get("image") === "1") {
+            res.writeHead(200, {
+              "Content-Type": "image/jpeg",
+              "Content-Length": String(cached.jpeg.length)
+            });
+            res.end(cached.jpeg);
+          } else {
+            const baseName = path.basename(filePath, path.extname(filePath));
+            const html2 = `<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>${escapeHtml(baseName)} - DNG Preview</title>
 <style>
 	body { margin: 0; background: #1e1e1e; color: #ccc; font-family: system-ui; display: flex; flex-direction: column; height: 100vh; }
 	.toolbar { padding: 8px 16px; background: #252526; border-bottom: 1px solid #333; display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
@@ -4758,44 +4850,44 @@ function activate(context) {
 	.meta pre { white-space: pre-wrap; word-break: break-all; }
 </style></head><body>
 <div class="toolbar">
-	<a href="/">\u2190 Back to folder</a>
-	<span><strong>${baseN}.dng</strong></span>
-	<span class="info">${cached.width} \xD7 ${cached.height}</span>
+	<a href="/">Back to folder</a>
+	<span><strong>${escapeHtml(path.basename(filePath))}</strong></span>
+	<span class="info">${cached.width} x ${cached.height}</span>
 	<button onclick="document.querySelector('.meta').classList.toggle('visible')">EXIF</button>
 </div>
-<div class="container"><img src="?file=${encodeURIComponent(filePath)}&image=1" alt="${baseN}"></div>
-<div class="meta"><pre>${metaJson.replace(/</g, "&lt;")}</pre></div>
+<div class="container"><img src="?file=${encodeURIComponent(filePath)}&image=1" alt="${escapeAttr(baseName)}"></div>
+<div class="meta"><pre>${escapeHtml(JSON.stringify(cached.metadata, null, 2))}</pre></div>
 </body></html>`;
-              res.writeHead(200, { "Content-Type": "text/html" });
-              res.end(html2);
-            }
-            return;
+            res.writeHead(200, { "Content-Type": "text/html" });
+            res.end(html2);
           }
-          if (filePath) {
-            if (!decodeCache.has(filePath)) {
-              try {
-                const result = await decodeDng(filePath);
-                decodeCache.set(filePath, {
-                  jpeg: result.jpegBuffer,
-                  width: result.width,
-                  height: result.height,
-                  metadata: result.metadata
-                });
-                res.writeHead(302, { "Location": `?file=${encodeURIComponent(filePath)}` });
-                res.end();
-                return;
-              } catch (e) {
-                const msg = e instanceof Error ? e.message : String(e);
-                res.writeHead(500, { "Content-Type": "text/plain" });
-                res.end(`Decode error: ${msg}`);
-                return;
-              }
-            }
+          return;
+        }
+        if (filePath) {
+          try {
+            const result = await decodeDng(filePath);
+            decodeCache.set(filePath, {
+              jpeg: result.jpegBuffer,
+              width: result.width,
+              height: result.height,
+              metadata: result.metadata
+            });
+            res.writeHead(302, { Location: `?file=${encodeURIComponent(filePath)}` });
+            res.end();
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            res.writeHead(500, { "Content-Type": "text/plain" });
+            res.end(`Decode error: ${message}`);
           }
-          const relPaths = dngFiles.map((f) => ({ full: f, rel: path.relative(folderPath, f).replace(/\\/g, "/") }));
-          const folderName = path.basename(folderPath).replace(/</g, "&lt;");
-          const html = `<!DOCTYPE html>
-<html><head><meta charset="utf-8"><title>${folderName} \u2014 DNG Folder Preview</title>
+          return;
+        }
+        const relPaths = dngFiles.map((fullPath) => ({
+          full: fullPath,
+          rel: path.relative(folderPath, fullPath).replace(/\\/g, "/")
+        }));
+        const folderName = path.basename(folderPath);
+        const html = `<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>${escapeHtml(folderName)} - DNG Folder Preview</title>
 <style>
 	body { margin: 0; background: #1e1e1e; color: #ccc; font-family: system-ui; padding: 16px; }
 	h1 { margin: 0 0 8px 0; }
@@ -4815,102 +4907,213 @@ function activate(context) {
 	a { color: #0e639c; text-decoration: none; }
 	a:hover { color: #1177bb; }
 </style></head><body>
-<h1>\u{1F4C1} ${folderName}</h1>
+<h1>${escapeHtml(folderName)}</h1>
 <div class="header">
 	<span>${dngFiles.length} DNG file${dngFiles.length !== 1 ? "s" : ""}</span>
 	<button id="decodeBtn" onclick="decodeAll()">Decode All Thumbnails</button>
 	<span id="progress" class="progress"></span>
 </div>
 <div class="grid" id="grid">
-${relPaths.map((p, i) => `<div class="item" data-file="${JSON.stringify(p.full).slice(1, -1)}" data-idx="${i}">
-	<a href="?file=${encodeURIComponent(p.full)}"><img data-src="?file=${encodeURIComponent(p.full)}&image=1" style="display:none"><div class="item-spinner"></div><span class="item-label">${path.basename(p.rel)}</span></a>
+${relPaths.map((entry) => `<div class="item" data-file="${escapeAttr(entry.full)}">
+	<a href="?file=${encodeURIComponent(entry.full)}"><img data-src="?file=${encodeURIComponent(entry.full)}&image=1" style="display:none"><div class="item-spinner"></div><span class="item-label">${escapeHtml(path.basename(entry.rel))}</span></a>
 </div>`).join("")}
 </div>
 <script>
 	let decoding = false;
-	const fileCount = ${dngFiles.length};
 
 	function decodeAll() {
 		if (decoding) { return; }
 		decoding = true;
 		document.getElementById('decodeBtn').disabled = true;
-		
-		const eventSource = new EventSource('/decode-all');
-		const startTime = Date.now();
 
-		eventSource.onmessage = (e) => {
-			const data = JSON.parse(e.data);
+		const eventSource = new EventSource('/decode-all');
+		eventSource.onmessage = (event) => {
+			const data = JSON.parse(event.data);
 			if (data.done) {
 				eventSource.close();
 				document.getElementById('decodeBtn').disabled = false;
-				document.getElementById('progress').textContent = 'Done!';
+				document.getElementById('progress').textContent = 'Done';
 				decoding = false;
 				return;
 			}
 
-			const { file, completed, total } = data;
-			document.getElementById('progress').textContent = \`\${completed}/\${total}\`;
+			document.getElementById('progress').textContent = data.completed + '/' + data.total;
 
-			// Update thumbnail
-			const item = document.querySelector(\`[data-file="\${file.replace(/"/g, '&quot;')}"]\`);
-			if (item) {
-				const img = item.querySelector('img');
-				const spinner = item.querySelector('.item-spinner');
-				if (img && !img.src) {
-					img.src = img.getAttribute('data-src');
-					img.style.display = 'block';
-					spinner.style.display = 'none';
-					img.onerror = () => { spinner.style.display = 'block'; img.style.display = 'none'; };
-				}
-			}
+			const selector = '[data-file="' + CSS.escape(data.file) + '"]';
+			const item = document.querySelector(selector);
+			if (!item) { return; }
+
+			const img = item.querySelector('img');
+			const spinner = item.querySelector('.item-spinner');
+			if (!img || !spinner || img.src) { return; }
+
+			img.src = img.getAttribute('data-src');
+			img.style.display = 'block';
+			spinner.style.display = 'none';
+			img.onerror = () => {
+				spinner.style.display = 'block';
+				img.style.display = 'none';
+			};
 		};
 
 		eventSource.onerror = () => {
 			eventSource.close();
 			document.getElementById('decodeBtn').disabled = false;
-			document.getElementById('progress').textContent = 'Error!';
+			document.getElementById('progress').textContent = 'Error';
 			decoding = false;
 		};
 	}
 </script>
 </body></html>`;
-          res.writeHead(200, { "Content-Type": "text/html" });
-          res.end(html);
+        res.writeHead(200, { "Content-Type": "text/html" });
+        res.end(html);
+      });
+      activeServer = server;
+      await new Promise((resolve, reject) => {
+        server.listen(0, "127.0.0.1", async () => {
+          try {
+            const addr = server.address();
+            const localUri = vscode3.Uri.parse(`http://127.0.0.1:${addr.port}/`);
+            const externalUri = await vscode3.env.asExternalUri(localUri);
+            await vscode3.env.openExternal(externalUri);
+            resolve();
+          } catch (error) {
+            reject(error);
+          }
         });
-        activeServer = server;
-        await new Promise((resolve, reject) => {
-          server.listen(0, "127.0.0.1", async () => {
-            try {
-              const addr = server.address();
-              const localUri = vscode2.Uri.parse(`http://127.0.0.1:${addr.port}/`);
-              const externalUri = await vscode2.env.asExternalUri(localUri);
-              await vscode2.env.openExternal(externalUri);
-              resolve();
-            } catch (e) {
-              reject(e);
-            }
-          });
-          server.on("error", reject);
-        });
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        vscode2.window.showErrorMessage(`DNG Folder Preview: ${message}`);
-      }
-    })
-  );
-  context.subscriptions.push({
-    dispose() {
-      if (activeServer) {
-        activeServer.close();
-      }
-      for (const f of tempFiles) {
-        try {
-          fs2.unlinkSync(f);
-        } catch {
-        }
-      }
+        server.on("error", reject);
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      vscode3.window.showErrorMessage(`DNG Folder Preview: ${message}`);
     }
   });
+  return vscode3.Disposable.from(command, new vscode3.Disposable(() => {
+    if (activeServer) {
+      activeServer.close();
+      activeServer = null;
+    }
+  }));
+}
+
+// src/webviewHelper.ts
+var vscode4 = __toESM(require("vscode"));
+async function showDngInWebview(panel, uri, extensionUri) {
+  const styleUri = panel.webview.asWebviewUri(
+    vscode4.Uri.joinPath(extensionUri, "media", "viewer.css")
+  );
+  const scriptUri = panel.webview.asWebviewUri(
+    vscode4.Uri.joinPath(extensionUri, "media", "viewer.js")
+  );
+  panel.webview.html = /* html */
+  `<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<link href="${styleUri}" rel="stylesheet">
+</head>
+<body class="loading">
+	<div class="loading-container" id="loading-container">
+		<div class="spinner"></div>
+		<p>Decoding DNG file...</p>
+	</div>
+
+	<div class="error-container" id="error-container" hidden>
+		<h2>Failed to decode DNG file</h2>
+		<p id="error-message"></p>
+	</div>
+
+	<div id="viewer-container" hidden>
+		<div class="toolbar">
+			<button id="btn-zoom-fit" title="Fit to window">Fit</button>
+			<button id="btn-zoom-100" title="Actual size (100%)">100%</button>
+			<button id="btn-zoom-in" title="Zoom in">+</button>
+			<button id="btn-zoom-out" title="Zoom out">&minus;</button>
+			<span id="zoom-level" class="zoom-level">100%</span>
+			<span class="separator"></span>
+			<span class="image-info" id="image-info"></span>
+			<span class="separator"></span>
+			<button id="btn-toggle-meta" title="Toggle EXIF metadata">EXIF</button>
+		</div>
+		<div class="content">
+			<div class="image-container" id="image-container">
+				<img id="preview-image" alt="DNG Preview" draggable="false">
+			</div>
+			<div class="metadata-panel" id="metadata-panel" hidden>
+				<h3>Camera Info</h3>
+				<div id="camera-info" class="camera-info"></div>
+				<h3>All Metadata</h3>
+				<pre id="metadata-content"></pre>
+			</div>
+		</div>
+	</div>
+
+	<script src="${scriptUri}"></script>
+</body>
+</html>`;
+  try {
+    const result = await decodeDng(uri.fsPath);
+    const jpegDataUri = `data:image/jpeg;base64,${result.jpegBuffer.toString("base64")}`;
+    panel.webview.postMessage({
+      type: "loaded",
+      jpegDataUri,
+      metadata: result.metadata,
+      width: result.width,
+      height: result.height,
+      originalWidth: result.originalWidth,
+      originalHeight: result.originalHeight
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    panel.webview.postMessage({
+      type: "error",
+      message
+    });
+  }
+}
+
+// src/extension.ts
+function activate(context) {
+  const provider = new DngPreviewProvider(context);
+  context.subscriptions.push(
+    vscode5.window.registerCustomEditorProvider(
+      DngPreviewProvider.viewType,
+      provider,
+      {
+        supportsMultipleEditorsPerDocument: true
+      }
+    )
+  );
+  context.subscriptions.push(
+    vscode5.commands.registerCommand("dngViewer.open", async (uri) => {
+      if (!uri) {
+        const uris = await vscode5.window.showOpenDialog({
+          canSelectMany: false,
+          filters: { "DNG Files": ["dng", "DNG"] }
+        });
+        if (!uris || uris.length === 0) {
+          return;
+        }
+        uri = uris[0];
+      }
+      const fileName = path2.basename(uri.fsPath);
+      const panel = vscode5.window.createWebviewPanel(
+        "dngViewer.commandPreview",
+        `DNG: ${fileName}`,
+        vscode5.ViewColumn.Active,
+        {
+          enableScripts: true,
+          enableForms: false,
+          localResourceRoots: [
+            vscode5.Uri.joinPath(context.extensionUri, "media")
+          ]
+        }
+      );
+      await showDngInWebview(panel, uri, context.extensionUri);
+    })
+  );
+  context.subscriptions.push(registerPreviewFolderCommand());
 }
 function deactivate() {
 }

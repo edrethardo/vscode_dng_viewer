@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import { DngPreviewProvider } from './dngPreviewProvider';
+import { registerPreviewFolderCommand } from './folderPreview';
 import { showDngInWebview } from './webviewHelper';
 
 export function activate(context: vscode.ExtensionContext) {
@@ -45,6 +46,8 @@ export function activate(context: vscode.ExtensionContext) {
 			await showDngInWebview(panel, uri, context.extensionUri);
 		})
 	);
+
+	context.subscriptions.push(registerPreviewFolderCommand());
 }
 
 export function deactivate() {}
