@@ -12,7 +12,25 @@
 			document.getElementById('preview-image').src = msg.jpegDataUri;
 			document.getElementById('image-info').innerHTML = msg.width + ' &times; ' + msg.height;
 			document.getElementById('metadata-content').textContent = JSON.stringify(msg.metadata, null, 2);
+
+			// Show progress bar if this is not high-res (i.e., high-res is loading)
+			var progressContainer = document.getElementById('progress-container');
+			if (progressContainer && !msg.isHighRes) {
+				progressContainer.style.display = '';
+			}
+
 			initViewer();
+		} else if (msg.type === 'high-res-loaded') {
+			// Swap to high-res image
+			document.getElementById('preview-image').src = msg.jpegDataUri;
+			document.getElementById('image-info').innerHTML = msg.width + ' &times; ' + msg.height;
+			document.getElementById('metadata-content').textContent = JSON.stringify(msg.metadata, null, 2);
+
+			// Hide progress bar
+			var progressContainer = document.getElementById('progress-container');
+			if (progressContainer) {
+				progressContainer.style.display = 'none';
+			}
 		} else if (msg.type === 'error') {
 			document.getElementById('loading-container').style.display = 'none';
 			document.body.classList.remove('loading');

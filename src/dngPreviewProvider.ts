@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { DngDocument } from './dngDocument';
-import { decodeDng } from './dngDecoder';
+import { decodeDng, decodeDngPreview, decodeDngHighRes } from './dngDecoder';
 
 export class DngPreviewProvider implements vscode.CustomReadonlyEditorProvider<DngDocument> {
 	public static readonly viewType = 'dngViewer.preview';
@@ -44,6 +44,7 @@ export class DngPreviewProvider implements vscode.CustomReadonlyEditorProvider<D
 		watcher.onDidChange(async () => {
 			// Clear cache so it re-decodes
 			document.jpegDataUri = undefined as any;
+			document.highResJpegDataUri = undefined as any;
 			await this._decodeAndPost(document, webviewPanel);
 		});
 		webviewPanel.onDidDispose(() => watcher.dispose());
@@ -51,21 +52,53 @@ export class DngPreviewProvider implements vscode.CustomReadonlyEditorProvider<D
 
 	private async _decodeAndPost(document: DngDocument, webviewPanel: vscode.WebviewPanel): Promise<void> {
 		try {
+			// Step 1: Decode preview immediately and post it
 			if (!document.jpegDataUri) {
-				const result = await decodeDng(document.uri.fsPath);
-				document.jpegDataUri = `data:image/jpeg;base64,${result.jpegBuffer.toString('base64')}`;
-				document.metadata = result.metadata;
-				document.width = result.width;
-				document.height = result.height;
+				const previewResult = await decodeDngPreview(document.uri.fsPath);
+				document.jpegDataUri = `data:image/jpeg;base64,${previewResult.jpegBuffer.toString('base64')}`;
+				document.metadata = previewResult.metadata;
+				document.width = previewResult.width;
+				document.height = previewResult.height;
 			}
 
+			// Post preview with loading indicator
 			webviewPanel.webview.postMessage({
 				type: 'loaded',
 				jpegDataUri: document.jpegDataUri,
 				metadata: document.metadata,
 				width: document.width,
 				height: document.height,
+				isHighRes: false,
 			});
+
+			// Step 2: Decode high-res in background (if not cached)
+			if (!document.highResJpegDataUri) {
+				const filePath = document.uri.fsPath;
+				// Fire off high-res decode without awaiting
+				decodeDngHighRes(filePath).then((highResResult) => {
+					// Cache and send high-res result
+					document.highResJpegDataUri = `data:image/jpeg;base64,${highResResult.jpegBuffer.toString('base64')}`;
+					webviewPanel.webview.postMessage({
+						type: 'high-res-loaded',
+						jpegDataUri: document.highResJpegDataUri,
+						metadata: highResResult.metadata,
+						width: highResResult.width,
+						height: highResResult.height,
+					});
+				}).catch((err) => {
+					// High-res decode failed, but we already have preview
+					console.error('High-res decode failed:', err);
+				});
+			} else {
+				// Already have high-res cached
+				webviewPanel.webview.postMessage({
+					type: 'high-res-loaded',
+					jpegDataUri: document.highResJpegDataUri,
+					metadata: document.metadata,
+					width: document.width,
+					height: document.height,
+				});
+			}
 		} catch (err) {
 			const message = err instanceof Error ? err.message : String(err);
 			webviewPanel.webview.postMessage({
@@ -110,6 +143,11 @@ export class DngPreviewProvider implements vscode.CustomReadonlyEditorProvider<D
 			<span id="zoom-level" class="zoom-level">100%</span>
 			<span class="separator"></span>
 			<span class="image-info" id="image-info"></span>
+			<span class="separator"></span>
+			<div id="progress-container" class="progress-container" style="display:none;">
+				<div class="progress-bar"></div>
+				<span class="progress-label">Loading high-res...</span>
+			</div>
 			<span class="separator"></span>
 			<button id="btn-toggle-meta" title="Toggle EXIF metadata">EXIF</button>
 		</div>

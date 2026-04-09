@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { decodeDng } from './dngDecoder';
+import { decodeDngPreview, decodeDngHighRes } from './dngDecoder';
 
 /**
  * Sets HTML once (loading state) and uses postMessage to push decoded data.
@@ -48,6 +48,11 @@ export async function showDngInWebview(
 			<span class="separator"></span>
 			<span class="image-info" id="image-info"></span>
 			<span class="separator"></span>
+			<div id="progress-container" class="progress-container" style="display:none;">
+				<div class="progress-bar"></div>
+				<span class="progress-label">Loading high-res...</span>
+			</div>
+			<span class="separator"></span>
 			<button id="btn-toggle-meta" title="Toggle EXIF metadata">EXIF</button>
 		</div>
 		<div class="content">
@@ -65,16 +70,17 @@ export async function showDngInWebview(
 </body>
 </html>`;
 
-	// Decode and send result via postMessage (no second html assignment)
+	// Step 1: Decode and send preview immediately
 	try {
-		const result = await decodeDng(uri.fsPath);
-		const jpegDataUri = `data:image/jpeg;base64,${result.jpegBuffer.toString('base64')}`;
+		const previewResult = await decodeDngPreview(uri.fsPath);
+		const previewJpegDataUri = `data:image/jpeg;base64,${previewResult.jpegBuffer.toString('base64')}`;
 		panel.webview.postMessage({
 			type: 'loaded',
-			jpegDataUri,
-			metadata: result.metadata,
-			width: result.width,
-			height: result.height,
+			jpegDataUri: previewJpegDataUri,
+			metadata: previewResult.metadata,
+			width: previewResult.width,
+			height: previewResult.height,
+			isHighRes: false,
 		});
 	} catch (err) {
 		const message = err instanceof Error ? err.message : String(err);
@@ -82,5 +88,22 @@ export async function showDngInWebview(
 			type: 'error',
 			message,
 		});
+		return; // Don't try high-res decode if preview fails
 	}
+
+	// Step 2: Decode high-res in background
+	decodeDngHighRes(uri.fsPath).then((highResResult) => {
+		const highResJpegDataUri = `data:image/jpeg;base64,${highResResult.jpegBuffer.toString('base64')}`;
+		panel.webview.postMessage({
+			type: 'high-res-loaded',
+			jpegDataUri: highResJpegDataUri,
+			metadata: highResResult.metadata,
+			width: highResResult.width,
+			height: highResResult.height,
+		});
+	}).catch((err) => {
+		// High-res decode failed, but we already have preview
+		console.error('High-res decode failed:', err);
+	});
 }
+

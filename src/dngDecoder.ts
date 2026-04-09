@@ -365,3 +365,39 @@ export async function decodeDng(filePath: string, maxWidth?: number): Promise<De
 	// Full decode via dcraw
 	return fullDecode(filePath, maxWidth);
 }
+
+/**
+ * Fast preview decode: low-resolution immediate result.
+ * Returns quickly with a small preview image (default 300px max width).
+ */
+export async function decodeDngPreview(filePath: string): Promise<DecodeResult> {
+	// Try fast path: embedded thumbnail
+	const thumbResult = await tryExifrThumbnail(filePath);
+	if (thumbResult) {
+		return thumbResult;
+	}
+
+	// Fallback: preview with max width of 300px
+	return fullDecode(filePath, 300);
+}
+
+/**
+ * High-resolution decode with optional progress callback.
+ * Decodes at full resolution (or close to it).
+ * @param filePath Path to DNG file
+ * @param onProgress Optional callback to report progress: (loaded: number, total: number) => void
+ */
+export async function decodeDngHighRes(
+	filePath: string,
+	onProgress?: (loaded: number, total: number) => void
+): Promise<DecodeResult> {
+	// High-res: no width limit (decode at full resolution)
+	const result = await fullDecode(filePath, Infinity);
+
+	// Notify completion
+	if (onProgress) {
+		onProgress(100, 100);
+	}
+
+	return result;
+}

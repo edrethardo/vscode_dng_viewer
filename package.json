@@ -2,7 +2,7 @@
   "name": "vscode-dng-viewer",
   "displayName": "DNG Viewer",
   "description": "View DNG (Digital Negative) raw camera files directly in VS Code, with zoom/pan controls and EXIF metadata display.",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "publisher": "EdRethardO",
   "license": "MIT",
   "engines": {

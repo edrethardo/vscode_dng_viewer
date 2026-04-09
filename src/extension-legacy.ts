@@ -8,6 +8,7 @@ import { decodeDng } from './dngDecoder';
 export function activate(context: vscode.ExtensionContext) {
 	const tempFiles: string[] = [];
 	const activeServers: http.Server[] = [];
+	const decoderJs = fs.readFileSync(path.join(context.extensionPath, 'media', 'dng-decoder.js'), 'utf8');
 
 	function closeAllServers() {
 		for (const s of activeServers) {
@@ -61,59 +62,25 @@ export function activate(context: vscode.ExtensionContext) {
 				const baseName = path.basename(uri.fsPath, path.extname(uri.fsPath));
 				const jpegBuf = result.jpegBuffer;
 				const metaJson = JSON.stringify(result.metadata, null, 2);
-
-				// Full-size decode state: decoded lazily on first /image.jpg request
-				let fullSizeBuf: Buffer | null = null;
-				let fullSizeDecoding = false;
-				let fullSizeError: string | null = null;
-				const fullSizeWaiters: Array<(buf: Buffer | null) => void> = [];
-
-				// Start full-size decode in background immediately
-				const startFullDecode = () => {
-					if (fullSizeDecoding || fullSizeBuf) { return; }
-					fullSizeDecoding = true;
-					decodeDng(uri!.fsPath, Infinity).then((fullResult) => {
-						fullSizeBuf = fullResult.jpegBuffer;
-						fullSizeDecoding = false;
-						for (const cb of fullSizeWaiters) { cb(fullSizeBuf); }
-						fullSizeWaiters.length = 0;
-					}).catch((e) => {
-						fullSizeError = e instanceof Error ? e.message : String(e);
-						fullSizeDecoding = false;
-						for (const cb of fullSizeWaiters) { cb(null); }
-						fullSizeWaiters.length = 0;
-					});
-				};
-				startFullDecode();
+				const dngFilePath = uri.fsPath;
 
 				// Serve an HTML page with the image + metadata
 				const server = http.createServer((req, res) => {
-					if (req.url === '/image.jpg') {
-						// Serve full-size image (wait if still decoding)
-						const serveFull = (buf: Buffer | null) => {
-							if (buf) {
-								res.writeHead(200, { 'Content-Type': 'image/jpeg', 'Content-Length': String(buf.length) });
-								res.end(buf);
-							} else {
-								// Fallback to preview-size on error
-								res.writeHead(200, { 'Content-Type': 'image/jpeg', 'Content-Length': String(jpegBuf.length) });
-								res.end(jpegBuf);
-							}
-						};
-						if (fullSizeBuf) {
-							serveFull(fullSizeBuf);
-						} else if (fullSizeError) {
-							serveFull(null);
-						} else {
-							fullSizeWaiters.push(serveFull);
-						}
-					} else if (req.url === '/thumb.jpg') {
+					if (req.url === '/thumb.jpg') {
 						res.writeHead(200, { 'Content-Type': 'image/jpeg', 'Content-Length': String(jpegBuf.length) });
 						res.end(jpegBuf);
-					} else if (req.url === '/decode-status') {
-						const status = fullSizeBuf ? 'ready' : fullSizeError ? 'error' : 'decoding';
-						res.writeHead(200, { 'Content-Type': 'application/json' });
-						res.end(JSON.stringify({ status }));
+					} else if (req.url === '/raw.dng') {
+						// Serve the raw DNG file for client-side decode
+						const stat = fs.statSync(dngFilePath);
+						res.writeHead(200, {
+							'Content-Type': 'application/octet-stream',
+							'Content-Length': String(stat.size),
+							'Cache-Control': 'max-age=3600',
+						});
+						fs.createReadStream(dngFilePath).pipe(res);
+					} else if (req.url === '/dng-decoder.js') {
+						res.writeHead(200, { 'Content-Type': 'application/javascript' });
+						res.end(decoderJs);
 					} else {
 						// Serve a simple HTML viewer
 						const html = `<!DOCTYPE html>
@@ -129,8 +96,9 @@ export function activate(context: vscode.ExtensionContext) {
 	.container { flex: 1; overflow: auto; display: flex; justify-content: center; align-items: center; position: relative; cursor: grab; }
 	.container.dragging { cursor: grabbing; }
 	#image-wrapper { transform-origin: center; transition: transform 0.1s ease-out; position: relative; }
-	.container img { display: block; object-fit: contain; opacity: 1; transition: opacity 0.3s; user-select: none; -webkit-user-drag: none; }
+	.container img, .container canvas { display: block; object-fit: contain; opacity: 1; transition: opacity 0.3s; user-select: none; -webkit-user-drag: none; }
 	.container img.loading { opacity: 0.7; }
+	#full-canvas { position: absolute; top: 0; left: 0; display: none; }
 	#progress-bar-container { position: fixed; top: 41px; left: 0; right: 0; height: 3px; background: #333; display: none; z-index: 10; }
 	#progress-bar-container.visible { display: block; }
 	#progress-bar { height: 100%; background: #0e639c; width: 0%; transition: width 0.15s; }
@@ -145,12 +113,13 @@ export function activate(context: vscode.ExtensionContext) {
 	<button onclick="zoomOut()">−</button>
 	<button onclick="resetZoom()">Reset</button>
 	<span class="zoom-display" id="zoom-display">100%</span>
-	<span class="load-status" id="load-status">Decoding full resolution...</span>
+	<span class="load-status" id="load-status">Downloading raw file...</span>
 	<button onclick="document.querySelector('.meta').classList.toggle('visible')">EXIF</button>
 </div>
 <div id="progress-bar-container"><div id="progress-bar"></div></div>
-<div class="container"><div id="image-wrapper"><img id="main-image" src="/thumb.jpg" alt="${baseName}"></div></div>
+<div class="container"><div id="image-wrapper"><img id="main-image" src="/thumb.jpg" alt="${baseName}"><canvas id="full-canvas"></canvas></div></div>
 <div class="meta"><pre>${metaJson.replace(/</g, '&lt;')}</pre></div>
+<script src="/dng-decoder.js"></script>
 <script>
 	let zoomLevel = 1;
 	const minZoom = 0.1;
@@ -205,69 +174,52 @@ export function activate(context: vscode.ExtensionContext) {
 		});
 	})();
 
-	// Load full resolution in background with progress tracking
+	// Client-side decode: download raw DNG and decode in browser
 	const progressBar = document.getElementById('progress-bar');
 	const progressContainer = document.getElementById('progress-bar-container');
 	const loadStatus = document.getElementById('load-status');
-	mainImg.classList.add('loading');
+	const fullCanvas = document.getElementById('full-canvas');
 	progressContainer.classList.add('visible');
-	
-	// Animate indeterminate progress during decode phase
-	let indeterminate = true;
-	let indeterminatePos = 0;
-	const indeterminateInterval = setInterval(() => {
-		if (!indeterminate) return;
-		indeterminatePos = (indeterminatePos + 2) % 100;
-		progressBar.style.width = '30%';
-		progressBar.style.marginLeft = indeterminatePos + '%';
-	}, 50);
-	
-	// Poll decode status, then fetch once ready
-	const pollStatus = () => {
-		fetch('/decode-status').then(r => r.json()).then(data => {
-			if (data.status === 'ready') {
-				// Decode done, now download with real progress
-				indeterminate = false;
-				clearInterval(indeterminateInterval);
-				progressBar.style.marginLeft = '0';
-				progressBar.style.width = '0%';
-				loadStatus.textContent = 'Downloading full resolution...';
-				
-				const xhr = new XMLHttpRequest();
-				xhr.responseType = 'blob';
-				xhr.addEventListener('progress', (e) => {
-					if (e.lengthComputable) {
-						progressBar.style.width = ((e.loaded / e.total) * 100) + '%';
-					}
-				});
-				xhr.addEventListener('load', () => {
-					const blob = xhr.response;
-					const url = URL.createObjectURL(blob);
-					mainImg.src = url;
-					mainImg.classList.remove('loading');
-					loadStatus.textContent = '';
-					setTimeout(() => progressContainer.classList.remove('visible'), 300);
-				});
-				xhr.addEventListener('error', () => {
-					mainImg.classList.remove('loading');
-					loadStatus.textContent = 'Failed to load full resolution';
-					progressContainer.classList.remove('visible');
-				});
-				xhr.open('GET', '/image.jpg');
-				xhr.send();
-			} else if (data.status === 'error') {
-				indeterminate = false;
-				clearInterval(indeterminateInterval);
-				mainImg.classList.remove('loading');
-				loadStatus.textContent = 'Full resolution decode failed';
-				progressContainer.classList.remove('visible');
-			} else {
-				// Still decoding, poll again
-				setTimeout(pollStatus, 500);
+
+	const xhr = new XMLHttpRequest();
+	xhr.responseType = 'arraybuffer';
+	xhr.addEventListener('progress', (e) => {
+		if (e.lengthComputable) {
+			progressBar.style.width = ((e.loaded / e.total) * 100) + '%';
+			loadStatus.textContent = 'Downloading ' + Math.round(e.loaded/1048576) + '/' + Math.round(e.total/1048576) + ' MB';
+		}
+	});
+	xhr.addEventListener('load', () => {
+		loadStatus.textContent = 'Decoding...';
+		progressBar.style.width = '100%';
+
+		// Size canvas overlay to match the displayed thumbnail
+		const rect = mainImg.getBoundingClientRect();
+		fullCanvas.style.width = rect.width + 'px';
+		fullCanvas.style.height = rect.height + 'px';
+		fullCanvas.style.display = 'block';
+
+		decodeDngToCanvas(xhr.response, fullCanvas,
+			function(pct) {
+				loadStatus.textContent = 'Rendering ' + Math.round(pct * 100) + '%';
+			},
+			function(err) {
+				if (err) {
+					loadStatus.textContent = 'Decode error: ' + err;
+					fullCanvas.style.display = 'none';
+					return;
+				}
+				loadStatus.textContent = '';
+				setTimeout(function() { progressContainer.classList.remove('visible'); }, 300);
 			}
-		}).catch(() => setTimeout(pollStatus, 1000));
-	};
-	pollStatus();
+		);
+	});
+	xhr.addEventListener('error', () => {
+		loadStatus.textContent = 'Download failed';
+		progressContainer.classList.remove('visible');
+	});
+	xhr.open('GET', '/raw.dng');
+	xhr.send();
 
 	document.addEventListener('wheel', (e) => {
 		const container = document.querySelector('.container');
@@ -347,13 +299,18 @@ export function activate(context: vscode.ExtensionContext) {
 
 				// Cache for decoded images
 				const decodeCache = new Map<string, { jpeg: Buffer; width: number; height: number; metadata: unknown }>();
-				// Cache for full-size decoded images
-				const fullSizeCache = new Map<string, Buffer>();
 
 				// Serve folder index + individual preview endpoints
 				const server = http.createServer(async (req, res) => {
 					const url = new URL(`http://localhost${req.url}`);
 					const filePath = url.searchParams.get('file');
+
+					// Serve browser-side decoder
+					if (req.url === '/dng-decoder.js') {
+						res.writeHead(200, { 'Content-Type': 'application/javascript' });
+						res.end(decoderJs);
+						return;
+					}
 
 					// Streaming decode endpoint
 					if (req.url === '/decode-all') {
@@ -421,25 +378,19 @@ export function activate(context: vscode.ExtensionContext) {
 
 					if (filePath && decodeCache.has(filePath)) {
 						const cached = decodeCache.get(filePath);
-						if (url.searchParams.get('image') === '1') {
-							// Serve full-size image: decode at full resolution on demand
-							const fullCacheKey = filePath + ':full';
-							if (fullSizeCache.has(fullCacheKey)) {
-								const fullBuf = fullSizeCache.get(fullCacheKey)!;
-								res.writeHead(200, { 'Content-Type': 'image/jpeg', 'Content-Length': String(fullBuf.length) });
-								res.end(fullBuf);
-							} else {
-								// Decode full-size on demand, then serve
-								try {
-									const fullResult = await decodeDng(filePath, Infinity);
-									fullSizeCache.set(fullCacheKey, fullResult.jpegBuffer);
-									res.writeHead(200, { 'Content-Type': 'image/jpeg', 'Content-Length': String(fullResult.jpegBuffer.length) });
-									res.end(fullResult.jpegBuffer);
-								} catch (e) {
-									// Fallback to cached preview
-									res.writeHead(200, { 'Content-Type': 'image/jpeg', 'Content-Length': String(cached!.jpeg.length) });
-									res.end(cached!.jpeg);
-								}
+						if (url.searchParams.get('raw') === '1') {
+							// Serve the raw DNG file for client-side decode
+							try {
+								const stat = fs.statSync(filePath);
+								res.writeHead(200, {
+									'Content-Type': 'application/octet-stream',
+									'Content-Length': String(stat.size),
+									'Cache-Control': 'max-age=3600',
+								});
+								fs.createReadStream(filePath).pipe(res);
+							} catch (e) {
+								res.writeHead(500, { 'Content-Type': 'text/plain' });
+								res.end('File not found');
 							}
 						} else if (url.searchParams.get('thumb') === '1') {
 							// Serve the preview-size cached image as thumbnail
@@ -461,8 +412,9 @@ export function activate(context: vscode.ExtensionContext) {
 	.container { flex: 1; overflow: auto; display: flex; justify-content: center; align-items: center; position: relative; cursor: grab; }
 	.container.dragging { cursor: grabbing; }
 	#image-wrapper { transform-origin: center; transition: transform 0.1s ease-out; position: relative; }
-	.container img { display: block; object-fit: contain; opacity: 1; transition: opacity 0.3s; user-select: none; -webkit-user-drag: none; }
+	.container img, .container canvas { display: block; object-fit: contain; opacity: 1; transition: opacity 0.3s; user-select: none; -webkit-user-drag: none; }
 	.container img.loading { opacity: 0.7; }
+	#full-canvas { position: absolute; top: 0; left: 0; display: none; }
 	#progress-bar-container { position: fixed; top: 41px; left: 0; right: 0; height: 3px; background: #333; display: none; z-index: 10; }
 	#progress-bar-container.visible { display: block; }
 	#progress-bar { height: 100%; background: #0e639c; width: 0%; transition: width 0.15s; }
@@ -478,12 +430,13 @@ export function activate(context: vscode.ExtensionContext) {
 	<button onclick="zoomOut()">−</button>
 	<button onclick="resetZoom()">Reset</button>
 	<span class="zoom-display" id="zoom-display">100%</span>
-	<span class="load-status" id="load-status">Loading full resolution...</span>
+	<span class="load-status" id="load-status">Downloading raw file...</span>
 	<button onclick="document.querySelector('.meta').classList.toggle('visible')">EXIF</button>
 </div>
 <div id="progress-bar-container"><div id="progress-bar"></div></div>
-<div class="container"><div id="image-wrapper"><img id="main-image" src="?file=${encodeURIComponent(filePath)}&thumb=1" alt="${baseN}"></div></div>
+<div class="container"><div id="image-wrapper"><img id="main-image" src="?file=${encodeURIComponent(filePath)}&thumb=1" alt="${baseN}"><canvas id="full-canvas"></canvas></div></div>
 <div class="meta"><pre>${metaJson.replace(/</g, '&lt;')}</pre></div>
+<script src="/dng-decoder.js"></script>
 <script>
 	let zoomLevel = 1;
 	const minZoom = 0.1;
@@ -537,55 +490,50 @@ export function activate(context: vscode.ExtensionContext) {
 		});
 	})();
 
-	// Load full resolution in background with progress
+	// Client-side decode: download raw DNG and decode in browser
 	const progressBar = document.getElementById('progress-bar');
 	const progressContainer = document.getElementById('progress-bar-container');
 	const loadStatus = document.getElementById('load-status');
-	mainImg.classList.add('loading');
+	const fullCanvas = document.getElementById('full-canvas');
 	progressContainer.classList.add('visible');
-	
-	// Indeterminate animation while server decodes full-size
-	let indeterminate = true;
-	let indeterminatePos = 0;
-	const indeterminateInterval = setInterval(() => {
-		if (!indeterminate) return;
-		indeterminatePos = (indeterminatePos + 2) % 100;
-		progressBar.style.width = '30%';
-		progressBar.style.marginLeft = indeterminatePos + '%';
-	}, 50);
 
-	// XHR for full-size image (server decodes on demand, blocks until ready)
 	const xhr = new XMLHttpRequest();
-	xhr.responseType = 'blob';
+	xhr.responseType = 'arraybuffer';
 	xhr.addEventListener('progress', (e) => {
 		if (e.lengthComputable) {
-			// Switch to determinate progress once download starts
-			indeterminate = false;
-			clearInterval(indeterminateInterval);
-			progressBar.style.marginLeft = '0';
-			loadStatus.textContent = 'Downloading full resolution...';
 			progressBar.style.width = ((e.loaded / e.total) * 100) + '%';
+			loadStatus.textContent = 'Downloading ' + Math.round(e.loaded/1048576) + '/' + Math.round(e.total/1048576) + ' MB';
 		}
 	});
 	xhr.addEventListener('load', () => {
-		indeterminate = false;
-		clearInterval(indeterminateInterval);
-		const blob = xhr.response;
-		const url = URL.createObjectURL(blob);
-		mainImg.src = url;
-		mainImg.classList.remove('loading');
-		loadStatus.textContent = '';
-		progressBar.style.marginLeft = '0';
-		setTimeout(() => progressContainer.classList.remove('visible'), 300);
+		loadStatus.textContent = 'Decoding...';
+		progressBar.style.width = '100%';
+
+		const rect = mainImg.getBoundingClientRect();
+		fullCanvas.style.width = rect.width + 'px';
+		fullCanvas.style.height = rect.height + 'px';
+		fullCanvas.style.display = 'block';
+
+		decodeDngToCanvas(xhr.response, fullCanvas,
+			function(pct) {
+				loadStatus.textContent = 'Rendering ' + Math.round(pct * 100) + '%';
+			},
+			function(err) {
+				if (err) {
+					loadStatus.textContent = 'Decode error: ' + err;
+					fullCanvas.style.display = 'none';
+					return;
+				}
+				loadStatus.textContent = '';
+				setTimeout(function() { progressContainer.classList.remove('visible'); }, 300);
+			}
+		);
 	});
 	xhr.addEventListener('error', () => {
-		indeterminate = false;
-		clearInterval(indeterminateInterval);
-		mainImg.classList.remove('loading');
-		loadStatus.textContent = 'Failed to load full resolution';
+		loadStatus.textContent = 'Download failed';
 		progressContainer.classList.remove('visible');
 	});
-	xhr.open('GET', '?file=${encodeURIComponent(filePath)}&image=1');
+	xhr.open('GET', '?file=${encodeURIComponent(filePath)}&raw=1');
 	xhr.send();
 
 	document.addEventListener('wheel', (e) => {
@@ -663,7 +611,6 @@ export function activate(context: vscode.ExtensionContext) {
 <h1>📁 ${folderName}</h1>
 <div class="header">
 	<span>${dngFiles.length} DNG file${dngFiles.length !== 1 ? 's' : ''}</span>
-	<button id="decodeBtn" onclick="decodeAll()">Decode All Thumbnails</button>
 	<span id="progress" class="progress"></span>
 </div>
 <div class="grid" id="grid">
@@ -672,24 +619,14 @@ ${relPaths.map((p, i) => `<div class="item" data-file="${JSON.stringify(p.full).
 </div>`).join('')}
 </div>
 <script>
-	let decoding = false;
-	const fileCount = ${dngFiles.length};
-
 	function decodeAll() {
-		if (decoding) { return; }
-		decoding = true;
-		document.getElementById('decodeBtn').disabled = true;
-		
 		const eventSource = new EventSource('/decode-all');
-		const startTime = Date.now();
 
 		eventSource.onmessage = (e) => {
 			const data = JSON.parse(e.data);
 			if (data.done) {
 				eventSource.close();
-				document.getElementById('decodeBtn').disabled = false;
 				document.getElementById('progress').textContent = 'Done!';
-				decoding = false;
 				return;
 			}
 
@@ -712,11 +649,11 @@ ${relPaths.map((p, i) => `<div class="item" data-file="${JSON.stringify(p.full).
 
 		eventSource.onerror = () => {
 			eventSource.close();
-			document.getElementById('decodeBtn').disabled = false;
-			document.getElementById('progress').textContent = 'Error!';
-			decoding = false;
+			document.getElementById('progress').textContent = 'Error — reload to retry';
 		};
 	}
+
+	decodeAll();
 </script>
 </body></html>`;
 
