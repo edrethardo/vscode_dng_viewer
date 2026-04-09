@@ -225,12 +225,13 @@ async function tryDecode(dcraw: string, filePath: string, halfSize: boolean, use
 /**
  * Full decode path: try all available raw decode tools in sequence.
  */
-async function fullDecode(filePath: string): Promise<DecodeResult> {
+async function fullDecode(filePath: string, maxWidthOverride?: number): Promise<DecodeResult> {
 	const config = vscode.workspace.getConfiguration('dngViewer');
-	const halfSize = config.get<boolean>('halfSize', true);
+	const isFullSize = maxWidthOverride === Infinity;
+	const halfSize = isFullSize ? false : config.get<boolean>('halfSize', true);
 	const useCameraWb = config.get<boolean>('useCameraWb', true);
-	const demosaicMode = config.get<string>('demosaicMode', 'fast');
-	const previewMaxWidth = config.get<number>('previewMaxWidth', 1000);
+	const demosaicMode = isFullSize ? 'full' : config.get<string>('demosaicMode', 'fast');
+	const previewMaxWidth = maxWidthOverride !== undefined ? maxWidthOverride : config.get<number>('previewMaxWidth', 300);
 
 	const tools = await findAllDcraw();
 	if (tools.length === 0) {
@@ -350,14 +351,17 @@ async function encodePpmToResult(filePath: string, pixels: Buffer, width: number
 /**
  * Decode a DNG file to JPEG.
  * Tries exifr thumbnail extraction first, falls back to dcraw full decode.
+ * @param maxWidth Optional max width override. 0 or undefined = use config default. Infinity = no limit.
  */
-export async function decodeDng(filePath: string): Promise<DecodeResult> {
-	// Fast path: try embedded thumbnail
-	const thumbResult = await tryExifrThumbnail(filePath);
-	if (thumbResult) {
-		return thumbResult;
+export async function decodeDng(filePath: string, maxWidth?: number): Promise<DecodeResult> {
+	// Fast path: try embedded thumbnail (only if not requesting full-size)
+	if (maxWidth === undefined || (maxWidth > 0 && maxWidth < Infinity)) {
+		const thumbResult = await tryExifrThumbnail(filePath);
+		if (thumbResult) {
+			return thumbResult;
+		}
 	}
 
 	// Full decode via dcraw
-	return fullDecode(filePath);
+	return fullDecode(filePath, maxWidth);
 }

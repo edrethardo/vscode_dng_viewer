@@ -4450,12 +4450,13 @@ async function tryDecode(dcraw, filePath, halfSize, useCameraWb) {
     }
   }
 }
-async function fullDecode(filePath) {
+async function fullDecode(filePath, maxWidthOverride) {
   const config = vscode.workspace.getConfiguration("dngViewer");
-  const halfSize = config.get("halfSize", true);
+  const isFullSize = maxWidthOverride === Infinity;
+  const halfSize = isFullSize ? false : config.get("halfSize", true);
   const useCameraWb = config.get("useCameraWb", true);
-  const demosaicMode = config.get("demosaicMode", "fast");
-  const previewMaxWidth = config.get("previewMaxWidth", 1e3);
+  const demosaicMode = isFullSize ? "full" : config.get("demosaicMode", "fast");
+  const previewMaxWidth = maxWidthOverride !== void 0 ? maxWidthOverride : config.get("previewMaxWidth", 300);
   const tools = await findAllDcraw();
   if (tools.length === 0) {
     throw new Error(
@@ -4552,18 +4553,32 @@ async function encodePpmToResult(filePath, pixels, width, height, maxWidth) {
     height: ds.height
   };
 }
-async function decodeDng(filePath) {
-  const thumbResult = await tryExifrThumbnail(filePath);
-  if (thumbResult) {
-    return thumbResult;
+async function decodeDng(filePath, maxWidth) {
+  if (maxWidth === void 0 || maxWidth > 0 && maxWidth < Infinity) {
+    const thumbResult = await tryExifrThumbnail(filePath);
+    if (thumbResult) {
+      return thumbResult;
+    }
   }
-  return fullDecode(filePath);
+  return fullDecode(filePath, maxWidth);
 }
 
 // src/extension-legacy.ts
 function activate(context) {
   const tempFiles = [];
-  let activeServer = null;
+  const activeServers = [];
+  function closeAllServers() {
+    for (const s of activeServers) {
+      try {
+        s.close();
+      } catch {
+      }
+    }
+    activeServers.length = 0;
+  }
+  function trackServer(server) {
+    activeServers.push(server);
+  }
   function findDngFiles(dir) {
     const dngs = [];
     const entries = fs2.readdirSync(dir, { withFileTypes: true });
@@ -4596,17 +4611,61 @@ function activate(context) {
             return await decodeDng(uri.fsPath);
           }
         );
-        if (activeServer) {
-          activeServer.close();
-          activeServer = null;
-        }
+        closeAllServers();
         const baseName = path.basename(uri.fsPath, path.extname(uri.fsPath));
         const jpegBuf = result.jpegBuffer;
         const metaJson = JSON.stringify(result.metadata, null, 2);
+        let fullSizeBuf = null;
+        let fullSizeDecoding = false;
+        let fullSizeError = null;
+        const fullSizeWaiters = [];
+        const startFullDecode = () => {
+          if (fullSizeDecoding || fullSizeBuf) {
+            return;
+          }
+          fullSizeDecoding = true;
+          decodeDng(uri.fsPath, Infinity).then((fullResult) => {
+            fullSizeBuf = fullResult.jpegBuffer;
+            fullSizeDecoding = false;
+            for (const cb of fullSizeWaiters) {
+              cb(fullSizeBuf);
+            }
+            fullSizeWaiters.length = 0;
+          }).catch((e) => {
+            fullSizeError = e instanceof Error ? e.message : String(e);
+            fullSizeDecoding = false;
+            for (const cb of fullSizeWaiters) {
+              cb(null);
+            }
+            fullSizeWaiters.length = 0;
+          });
+        };
+        startFullDecode();
         const server = http.createServer((req, res) => {
           if (req.url === "/image.jpg") {
+            const serveFull = (buf) => {
+              if (buf) {
+                res.writeHead(200, { "Content-Type": "image/jpeg", "Content-Length": String(buf.length) });
+                res.end(buf);
+              } else {
+                res.writeHead(200, { "Content-Type": "image/jpeg", "Content-Length": String(jpegBuf.length) });
+                res.end(jpegBuf);
+              }
+            };
+            if (fullSizeBuf) {
+              serveFull(fullSizeBuf);
+            } else if (fullSizeError) {
+              serveFull(null);
+            } else {
+              fullSizeWaiters.push(serveFull);
+            }
+          } else if (req.url === "/thumb.jpg") {
             res.writeHead(200, { "Content-Type": "image/jpeg", "Content-Length": String(jpegBuf.length) });
             res.end(jpegBuf);
+          } else if (req.url === "/decode-status") {
+            const status = fullSizeBuf ? "ready" : fullSizeError ? "error" : "decoding";
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ status }));
           } else {
             const html = `<!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>${baseName} \u2014 DNG Preview</title>
@@ -4616,8 +4675,16 @@ function activate(context) {
 	.toolbar button { background: #0e639c; color: #fff; border: none; padding: 4px 12px; border-radius: 3px; cursor: pointer; }
 	.toolbar button:hover { background: #1177bb; }
 	.toolbar .info { font-size: 13px; opacity: 0.7; }
-	.container { flex: 1; overflow: auto; display: flex; justify-content: center; align-items: center; }
-	.container img { max-width: 100%; max-height: 100%; object-fit: contain; }
+	.zoom-display { font-size: 13px; opacity: 0.7; min-width: 60px; }
+	.load-status { font-size: 12px; opacity: 0.7; color: #ccc; }
+	.container { flex: 1; overflow: auto; display: flex; justify-content: center; align-items: center; position: relative; cursor: grab; }
+	.container.dragging { cursor: grabbing; }
+	#image-wrapper { transform-origin: center; transition: transform 0.1s ease-out; position: relative; }
+	.container img { display: block; object-fit: contain; opacity: 1; transition: opacity 0.3s; user-select: none; -webkit-user-drag: none; }
+	.container img.loading { opacity: 0.7; }
+	#progress-bar-container { position: fixed; top: 41px; left: 0; right: 0; height: 3px; background: #333; display: none; z-index: 10; }
+	#progress-bar-container.visible { display: block; }
+	#progress-bar { height: 100%; background: #0e639c; width: 0%; transition: width 0.15s; }
 	.meta { display: none; position: fixed; right: 0; top: 40px; bottom: 0; width: 350px; background: #252526; border-left: 1px solid #333; overflow: auto; padding: 12px; font-size: 12px; }
 	.meta.visible { display: block; }
 	.meta pre { white-space: pre-wrap; word-break: break-all; }
@@ -4625,16 +4692,158 @@ function activate(context) {
 <div class="toolbar">
 	<span><strong>${baseName}.dng</strong></span>
 	<span class="info">${result.width} \xD7 ${result.height}</span>
+	<button onclick="zoomIn()">+</button>
+	<button onclick="zoomOut()">\u2212</button>
+	<button onclick="resetZoom()">Reset</button>
+	<span class="zoom-display" id="zoom-display">100%</span>
+	<span class="load-status" id="load-status">Decoding full resolution...</span>
 	<button onclick="document.querySelector('.meta').classList.toggle('visible')">EXIF</button>
 </div>
-<div class="container"><img src="/image.jpg" alt="${baseName}"></div>
+<div id="progress-bar-container"><div id="progress-bar"></div></div>
+<div class="container"><div id="image-wrapper"><img id="main-image" src="/thumb.jpg" alt="${baseName}"></div></div>
 <div class="meta"><pre>${metaJson.replace(/</g, "&lt;")}</pre></div>
+<script>
+	let zoomLevel = 1;
+	const minZoom = 0.1;
+	const maxZoom = 8;
+	const mainImg = document.getElementById('main-image');
+
+	let panX = 0, panY = 0;
+
+	function updateZoom() {
+		const wrapper = document.getElementById('image-wrapper');
+		wrapper.style.transform = \`translate(\${panX}px, \${panY}px) scale(\${zoomLevel})\`;
+		document.getElementById('zoom-display').textContent = Math.round(zoomLevel * 100) + '%';
+	}
+
+	function zoomIn() {
+		zoomLevel = Math.min(maxZoom, zoomLevel * 1.2);
+		updateZoom();
+	}
+
+	function zoomOut() {
+		zoomLevel = Math.max(minZoom, zoomLevel / 1.2);
+		updateZoom();
+	}
+
+	function resetZoom() {
+		zoomLevel = 1;
+		panX = 0; panY = 0;
+		updateZoom();
+	}
+
+	// Drag-to-pan
+	(function() {
+		const container = document.querySelector('.container');
+		let dragging = false, startX = 0, startY = 0, startPanX = 0, startPanY = 0;
+		container.addEventListener('mousedown', function(e) {
+			if (e.button !== 0) return;
+			dragging = true; startX = e.clientX; startY = e.clientY;
+			startPanX = panX; startPanY = panY;
+			container.classList.add('dragging');
+			e.preventDefault();
+		});
+		document.addEventListener('mousemove', function(e) {
+			if (!dragging) return;
+			panX = startPanX + (e.clientX - startX);
+			panY = startPanY + (e.clientY - startY);
+			updateZoom();
+		});
+		document.addEventListener('mouseup', function() {
+			if (!dragging) return;
+			dragging = false;
+			container.classList.remove('dragging');
+		});
+	})();
+
+	// Load full resolution in background with progress tracking
+	const progressBar = document.getElementById('progress-bar');
+	const progressContainer = document.getElementById('progress-bar-container');
+	const loadStatus = document.getElementById('load-status');
+	mainImg.classList.add('loading');
+	progressContainer.classList.add('visible');
+	
+	// Animate indeterminate progress during decode phase
+	let indeterminate = true;
+	let indeterminatePos = 0;
+	const indeterminateInterval = setInterval(() => {
+		if (!indeterminate) return;
+		indeterminatePos = (indeterminatePos + 2) % 100;
+		progressBar.style.width = '30%';
+		progressBar.style.marginLeft = indeterminatePos + '%';
+	}, 50);
+	
+	// Poll decode status, then fetch once ready
+	const pollStatus = () => {
+		fetch('/decode-status').then(r => r.json()).then(data => {
+			if (data.status === 'ready') {
+				// Decode done, now download with real progress
+				indeterminate = false;
+				clearInterval(indeterminateInterval);
+				progressBar.style.marginLeft = '0';
+				progressBar.style.width = '0%';
+				loadStatus.textContent = 'Downloading full resolution...';
+				
+				const xhr = new XMLHttpRequest();
+				xhr.responseType = 'blob';
+				xhr.addEventListener('progress', (e) => {
+					if (e.lengthComputable) {
+						progressBar.style.width = ((e.loaded / e.total) * 100) + '%';
+					}
+				});
+				xhr.addEventListener('load', () => {
+					const blob = xhr.response;
+					const url = URL.createObjectURL(blob);
+					mainImg.src = url;
+					mainImg.classList.remove('loading');
+					loadStatus.textContent = '';
+					setTimeout(() => progressContainer.classList.remove('visible'), 300);
+				});
+				xhr.addEventListener('error', () => {
+					mainImg.classList.remove('loading');
+					loadStatus.textContent = 'Failed to load full resolution';
+					progressContainer.classList.remove('visible');
+				});
+				xhr.open('GET', '/image.jpg');
+				xhr.send();
+			} else if (data.status === 'error') {
+				indeterminate = false;
+				clearInterval(indeterminateInterval);
+				mainImg.classList.remove('loading');
+				loadStatus.textContent = 'Full resolution decode failed';
+				progressContainer.classList.remove('visible');
+			} else {
+				// Still decoding, poll again
+				setTimeout(pollStatus, 500);
+			}
+		}).catch(() => setTimeout(pollStatus, 1000));
+	};
+	pollStatus();
+
+	document.addEventListener('wheel', (e) => {
+		const container = document.querySelector('.container');
+		if (e.target === container || container.contains(e.target)) {
+			e.preventDefault();
+			if (e.deltaY < 0) {
+				zoomIn();
+			} else {
+				zoomOut();
+			}
+		}
+	}, { passive: false });
+
+	document.addEventListener('keydown', (e) => {
+		if (e.key === '+' || e.key === '=') zoomIn();
+		if (e.key === '-') zoomOut();
+		if (e.key === '0') resetZoom();
+	});
+</script>
 </body></html>`;
             res.writeHead(200, { "Content-Type": "text/html" });
             res.end(html);
           }
         });
-        activeServer = server;
+        trackServer(server);
         await new Promise((resolve, reject) => {
           server.listen(0, "127.0.0.1", async () => {
             try {
@@ -4680,11 +4889,9 @@ function activate(context) {
           vscode2.window.showWarningMessage(`No DNG files found in ${path.basename(folderPath)}`);
           return;
         }
-        if (activeServer) {
-          activeServer.close();
-          activeServer = null;
-        }
+        closeAllServers();
         const decodeCache = /* @__PURE__ */ new Map();
+        const fullSizeCache = /* @__PURE__ */ new Map();
         const server = http.createServer(async (req, res) => {
           const url = new URL(`http://localhost${req.url}`);
           const filePath = url.searchParams.get("file");
@@ -4699,8 +4906,19 @@ function activate(context) {
             let queueIdx = 0;
             let inProgress = 0;
             let completed = 0;
+            let closed = false;
+            const safeSend = (msg) => {
+              if (closed) {
+                return;
+              }
+              try {
+                res.write(msg);
+              } catch (e) {
+                closed = true;
+              }
+            };
             const processNext = async () => {
-              if (queueIdx >= queue.length) {
+              if (queueIdx >= queue.length || closed) {
                 return;
               }
               inProgress++;
@@ -4716,28 +4934,55 @@ function activate(context) {
                   });
                 }
               } catch (e) {
-              }
-              completed++;
-              res.write(`data: {"file":"${JSON.stringify(fPath).slice(1, -1)}","completed":${completed},"total":${dngFiles.length}}
+              } finally {
+                completed++;
+                safeSend(`data: {"file":"${JSON.stringify(fPath).slice(1, -1)}","completed":${completed},"total":${dngFiles.length}}
 
 `);
-              inProgress--;
-              if (queueIdx < queue.length) {
-                processNext();
-              } else if (inProgress === 0) {
-                res.write('data: {"done":true}\n\n');
-                res.end();
+                inProgress--;
+                if (queueIdx < queue.length) {
+                  processNext();
+                } else if (inProgress === 0 && !closed) {
+                  safeSend('data: {"done":true}\n\n');
+                  try {
+                    res.end();
+                  } catch (e) {
+                  }
+                }
               }
             };
             for (let i = 0; i < Math.min(concurrency, queue.length); i++) {
               processNext();
             }
-            req.on("close", () => res.end());
+            req.on("close", () => {
+              closed = true;
+              try {
+                res.end();
+              } catch (e) {
+              }
+            });
             return;
           }
           if (filePath && decodeCache.has(filePath)) {
             const cached = decodeCache.get(filePath);
             if (url.searchParams.get("image") === "1") {
+              const fullCacheKey = filePath + ":full";
+              if (fullSizeCache.has(fullCacheKey)) {
+                const fullBuf = fullSizeCache.get(fullCacheKey);
+                res.writeHead(200, { "Content-Type": "image/jpeg", "Content-Length": String(fullBuf.length) });
+                res.end(fullBuf);
+              } else {
+                try {
+                  const fullResult = await decodeDng(filePath, Infinity);
+                  fullSizeCache.set(fullCacheKey, fullResult.jpegBuffer);
+                  res.writeHead(200, { "Content-Type": "image/jpeg", "Content-Length": String(fullResult.jpegBuffer.length) });
+                  res.end(fullResult.jpegBuffer);
+                } catch (e) {
+                  res.writeHead(200, { "Content-Type": "image/jpeg", "Content-Length": String(cached.jpeg.length) });
+                  res.end(cached.jpeg);
+                }
+              }
+            } else if (url.searchParams.get("thumb") === "1") {
               res.writeHead(200, { "Content-Type": "image/jpeg", "Content-Length": String(cached.jpeg.length) });
               res.end(cached.jpeg);
             } else {
@@ -4751,8 +4996,16 @@ function activate(context) {
 	.toolbar a, .toolbar button { background: #0e639c; color: #fff; border: none; padding: 4px 12px; border-radius: 3px; cursor: pointer; text-decoration: none; display: inline-block; }
 	.toolbar a:hover, .toolbar button:hover { background: #1177bb; }
 	.toolbar .info { font-size: 13px; opacity: 0.7; }
-	.container { flex: 1; overflow: auto; display: flex; justify-content: center; align-items: center; }
-	.container img { max-width: 100%; max-height: 100%; object-fit: contain; }
+	.zoom-display { font-size: 13px; opacity: 0.7; min-width: 60px; }
+	.load-status { font-size: 12px; opacity: 0.7; color: #ccc; }
+	.container { flex: 1; overflow: auto; display: flex; justify-content: center; align-items: center; position: relative; cursor: grab; }
+	.container.dragging { cursor: grabbing; }
+	#image-wrapper { transform-origin: center; transition: transform 0.1s ease-out; position: relative; }
+	.container img { display: block; object-fit: contain; opacity: 1; transition: opacity 0.3s; user-select: none; -webkit-user-drag: none; }
+	.container img.loading { opacity: 0.7; }
+	#progress-bar-container { position: fixed; top: 41px; left: 0; right: 0; height: 3px; background: #333; display: none; z-index: 10; }
+	#progress-bar-container.visible { display: block; }
+	#progress-bar { height: 100%; background: #0e639c; width: 0%; transition: width 0.15s; }
 	.meta { display: none; position: fixed; right: 0; top: 40px; bottom: 0; width: 350px; background: #252526; border-left: 1px solid #333; overflow: auto; padding: 12px; font-size: 12px; }
 	.meta.visible { display: block; }
 	.meta pre { white-space: pre-wrap; word-break: break-all; }
@@ -4761,10 +5014,138 @@ function activate(context) {
 	<a href="/">\u2190 Back to folder</a>
 	<span><strong>${baseN}.dng</strong></span>
 	<span class="info">${cached.width} \xD7 ${cached.height}</span>
+	<button onclick="zoomIn()">+</button>
+	<button onclick="zoomOut()">\u2212</button>
+	<button onclick="resetZoom()">Reset</button>
+	<span class="zoom-display" id="zoom-display">100%</span>
+	<span class="load-status" id="load-status">Loading full resolution...</span>
 	<button onclick="document.querySelector('.meta').classList.toggle('visible')">EXIF</button>
 </div>
-<div class="container"><img src="?file=${encodeURIComponent(filePath)}&image=1" alt="${baseN}"></div>
+<div id="progress-bar-container"><div id="progress-bar"></div></div>
+<div class="container"><div id="image-wrapper"><img id="main-image" src="?file=${encodeURIComponent(filePath)}&thumb=1" alt="${baseN}"></div></div>
 <div class="meta"><pre>${metaJson.replace(/</g, "&lt;")}</pre></div>
+<script>
+	let zoomLevel = 1;
+	const minZoom = 0.1;
+	const maxZoom = 8;
+	const mainImg = document.getElementById('main-image');
+	let panX = 0, panY = 0;
+
+	function updateZoom() {
+		const wrapper = document.getElementById('image-wrapper');
+		wrapper.style.transform = \`translate(\${panX}px, \${panY}px) scale(\${zoomLevel})\`;
+		document.getElementById('zoom-display').textContent = Math.round(zoomLevel * 100) + '%';
+	}
+
+	function zoomIn() {
+		zoomLevel = Math.min(maxZoom, zoomLevel * 1.2);
+		updateZoom();
+	}
+
+	function zoomOut() {
+		zoomLevel = Math.max(minZoom, zoomLevel / 1.2);
+		updateZoom();
+	}
+
+	function resetZoom() {
+		zoomLevel = 1;
+		panX = 0; panY = 0;
+		updateZoom();
+	}
+
+	// Drag-to-pan
+	(function() {
+		const container = document.querySelector('.container');
+		let dragging = false, startX = 0, startY = 0, startPanX = 0, startPanY = 0;
+		container.addEventListener('mousedown', function(e) {
+			if (e.button !== 0) return;
+			dragging = true; startX = e.clientX; startY = e.clientY;
+			startPanX = panX; startPanY = panY;
+			container.classList.add('dragging');
+			e.preventDefault();
+		});
+		document.addEventListener('mousemove', function(e) {
+			if (!dragging) return;
+			panX = startPanX + (e.clientX - startX);
+			panY = startPanY + (e.clientY - startY);
+			updateZoom();
+		});
+		document.addEventListener('mouseup', function() {
+			if (!dragging) return;
+			dragging = false;
+			container.classList.remove('dragging');
+		});
+	})();
+
+	// Load full resolution in background with progress
+	const progressBar = document.getElementById('progress-bar');
+	const progressContainer = document.getElementById('progress-bar-container');
+	const loadStatus = document.getElementById('load-status');
+	mainImg.classList.add('loading');
+	progressContainer.classList.add('visible');
+	
+	// Indeterminate animation while server decodes full-size
+	let indeterminate = true;
+	let indeterminatePos = 0;
+	const indeterminateInterval = setInterval(() => {
+		if (!indeterminate) return;
+		indeterminatePos = (indeterminatePos + 2) % 100;
+		progressBar.style.width = '30%';
+		progressBar.style.marginLeft = indeterminatePos + '%';
+	}, 50);
+
+	// XHR for full-size image (server decodes on demand, blocks until ready)
+	const xhr = new XMLHttpRequest();
+	xhr.responseType = 'blob';
+	xhr.addEventListener('progress', (e) => {
+		if (e.lengthComputable) {
+			// Switch to determinate progress once download starts
+			indeterminate = false;
+			clearInterval(indeterminateInterval);
+			progressBar.style.marginLeft = '0';
+			loadStatus.textContent = 'Downloading full resolution...';
+			progressBar.style.width = ((e.loaded / e.total) * 100) + '%';
+		}
+	});
+	xhr.addEventListener('load', () => {
+		indeterminate = false;
+		clearInterval(indeterminateInterval);
+		const blob = xhr.response;
+		const url = URL.createObjectURL(blob);
+		mainImg.src = url;
+		mainImg.classList.remove('loading');
+		loadStatus.textContent = '';
+		progressBar.style.marginLeft = '0';
+		setTimeout(() => progressContainer.classList.remove('visible'), 300);
+	});
+	xhr.addEventListener('error', () => {
+		indeterminate = false;
+		clearInterval(indeterminateInterval);
+		mainImg.classList.remove('loading');
+		loadStatus.textContent = 'Failed to load full resolution';
+		progressContainer.classList.remove('visible');
+	});
+	xhr.open('GET', '?file=${encodeURIComponent(filePath)}&image=1');
+	xhr.send();
+
+	document.addEventListener('wheel', (e) => {
+		const container = document.querySelector('.container');
+		if (e.target === container || container.contains(e.target)) {
+			e.preventDefault();
+			if (e.deltaY < 0) {
+				zoomIn();
+			} else {
+				zoomOut();
+			}
+		}
+	}, { passive: false });
+
+	document.addEventListener('keydown', (e) => {
+		if (e.key === '+' || e.key === '=') zoomIn();
+		if (e.key === '-') zoomOut();
+		if (e.key === '0') resetZoom();
+	});
+</script>
 </body></html>`;
               res.writeHead(200, { "Content-Type": "text/html" });
               res.end(html2);
@@ -4823,7 +5204,7 @@ function activate(context) {
 </div>
 <div class="grid" id="grid">
 ${relPaths.map((p, i) => `<div class="item" data-file="${JSON.stringify(p.full).slice(1, -1)}" data-idx="${i}">
-	<a href="?file=${encodeURIComponent(p.full)}"><img data-src="?file=${encodeURIComponent(p.full)}&image=1" style="display:none"><div class="item-spinner"></div><span class="item-label">${path.basename(p.rel)}</span></a>
+	<a href="?file=${encodeURIComponent(p.full)}"><img data-src="?file=${encodeURIComponent(p.full)}&thumb=1" style="display:none"><div class="item-spinner"></div><span class="item-label">${path.basename(p.rel)}</span></a>
 </div>`).join("")}
 </div>
 <script>
@@ -4877,7 +5258,7 @@ ${relPaths.map((p, i) => `<div class="item" data-file="${JSON.stringify(p.full).
           res.writeHead(200, { "Content-Type": "text/html" });
           res.end(html);
         });
-        activeServer = server;
+        trackServer(server);
         await new Promise((resolve, reject) => {
           server.listen(0, "127.0.0.1", async () => {
             try {
@@ -4900,9 +5281,7 @@ ${relPaths.map((p, i) => `<div class="item" data-file="${JSON.stringify(p.full).
   );
   context.subscriptions.push({
     dispose() {
-      if (activeServer) {
-        activeServer.close();
-      }
+      closeAllServers();
       for (const f of tempFiles) {
         try {
           fs2.unlinkSync(f);
