@@ -36,10 +36,8 @@
 		var infoEl = document.getElementById('camera-info');
 		var rawEl = document.getElementById('metadata-content');
 
-		// Raw JSON for power users
-		rawEl.textContent = JSON.stringify(meta, null, 2);
-
 		if (!meta || Object.keys(meta).length === 0) {
+			if (rawEl) rawEl.textContent = '';
 			if (infoEl) {
 				infoEl.replaceChildren();
 				var emptyRow = document.createElement('div');
@@ -52,6 +50,9 @@
 			}
 			return;
 		}
+
+		// Raw JSON for power users
+		if (rawEl) rawEl.textContent = JSON.stringify(meta, null, 2) || '';
 
 		var fields = [];
 

@@ -4497,7 +4497,7 @@ async function fullDecode(filePath) {
     if (result && result.ppmBuffer.length > 0) {
       try {
         const { width, height, pixels } = parsePpm(result.ppmBuffer);
-        return await encodePpmToResult(pixels, width, height, previewMaxWidth, exifMetadata, origWidth || width, origHeight || height);
+        return encodePpmToResult(pixels, width, height, previewMaxWidth, exifMetadata, origWidth || width, origHeight || height);
       } catch (e) {
         errors.push(`${tool}: PPM parse failed \u2014 ${e instanceof Error ? e.message : e}`);
       }
@@ -4508,7 +4508,7 @@ async function fullDecode(filePath) {
   try {
     const direct = decodeDngDirect(filePath, demosaicMode === "full");
     if (direct) {
-      return await encodePpmToResult(direct.pixels, direct.width, direct.height, previewMaxWidth, exifMetadata, origWidth || direct.width, origHeight || direct.height);
+      return encodePpmToResult(direct.pixels, direct.width, direct.height, previewMaxWidth, exifMetadata, origWidth || direct.width, origHeight || direct.height);
     }
     errors.push("direct JS decoder: format not supported");
   } catch (e) {
@@ -4669,7 +4669,7 @@ var DngPreviewProvider = class {
 <head>
 	<meta charset="UTF-8">
 	<meta name="viewport" content="width=device-width, initial-scale=1.0">
-	<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${webview.cspSource} data:; style-src ${webview.cspSource}; script-src 'nonce-${nonce}';">
+	<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${webview.cspSource} data:; style-src ${webview.cspSource}; style-src-attr 'unsafe-inline'; script-src 'nonce-${nonce}';">
 	<link href="${styleUri}" rel="stylesheet">
 </head>
 <body class="loading">
@@ -4678,12 +4678,12 @@ var DngPreviewProvider = class {
 		<p>Decoding DNG file...</p>
 	</div>
 
-	<div class="error-container" id="error-container" style="display:none;">
+	<div class="error-container" id="error-container" hidden>
 		<h2>Failed to decode DNG file</h2>
 		<p id="error-message"></p>
 	</div>
 
-	<div id="viewer-container" style="display:none;">
+	<div id="viewer-container" hidden>
 		<div class="toolbar">
 			<button id="btn-zoom-fit" title="Fit to window">Fit</button>
 			<button id="btn-zoom-100" title="Actual size (100%)">100%</button>
@@ -4699,7 +4699,7 @@ var DngPreviewProvider = class {
 			<div class="image-container" id="image-container">
 				<img id="preview-image" alt="DNG Preview" draggable="false">
 			</div>
-			<div class="metadata-panel" id="metadata-panel" style="display:none;">
+			<div class="metadata-panel" id="metadata-panel" hidden>
 				<h3>Camera Info</h3>
 				<div id="camera-info" class="camera-info"></div>
 				<h3>All Metadata</h3>
@@ -4738,12 +4738,12 @@ async function showDngInWebview(panel, uri, extensionUri) {
 		<p>Decoding DNG file...</p>
 	</div>
 
-	<div class="error-container" id="error-container" style="display:none;">
+	<div class="error-container" id="error-container" hidden>
 		<h2>Failed to decode DNG file</h2>
 		<p id="error-message"></p>
 	</div>
 
-	<div id="viewer-container" style="display:none;">
+	<div id="viewer-container" hidden>
 		<div class="toolbar">
 			<button id="btn-zoom-fit" title="Fit to window">Fit</button>
 			<button id="btn-zoom-100" title="Actual size (100%)">100%</button>
@@ -4759,8 +4759,10 @@ async function showDngInWebview(panel, uri, extensionUri) {
 			<div class="image-container" id="image-container">
 				<img id="preview-image" alt="DNG Preview" draggable="false">
 			</div>
-			<div class="metadata-panel" id="metadata-panel" style="display:none;">
-				<h3>EXIF Metadata</h3>
+			<div class="metadata-panel" id="metadata-panel" hidden>
+				<h3>Camera Info</h3>
+				<div id="camera-info" class="camera-info"></div>
+				<h3>All Metadata</h3>
 				<pre id="metadata-content"></pre>
 			</div>
 		</div>
@@ -4777,7 +4779,9 @@ async function showDngInWebview(panel, uri, extensionUri) {
       jpegDataUri,
       metadata: result.metadata,
       width: result.width,
-      height: result.height
+      height: result.height,
+      originalWidth: result.originalWidth,
+      originalHeight: result.originalHeight
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

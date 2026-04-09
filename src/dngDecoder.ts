@@ -270,7 +270,7 @@ async function fullDecode(filePath: string): Promise<DecodeResult> {
 		if (result && result.ppmBuffer.length > 0) {
 			try {
 				const { width, height, pixels } = parsePpm(result.ppmBuffer);
-				return await encodePpmToResult(pixels, width, height, previewMaxWidth, exifMetadata, origWidth || width, origHeight || height);
+				return encodePpmToResult(pixels, width, height, previewMaxWidth, exifMetadata, origWidth || width, origHeight || height);
 			} catch (e) {
 				errors.push(`${tool}: PPM parse failed — ${e instanceof Error ? e.message : e}`);
 			}
@@ -283,7 +283,7 @@ async function fullDecode(filePath: string): Promise<DecodeResult> {
 	try {
 		const direct = decodeDngDirect(filePath, demosaicMode === 'full');
 		if (direct) {
-			return await encodePpmToResult(direct.pixels, direct.width, direct.height, previewMaxWidth, exifMetadata, origWidth || direct.width, origHeight || direct.height);
+			return encodePpmToResult(direct.pixels, direct.width, direct.height, previewMaxWidth, exifMetadata, origWidth || direct.width, origHeight || direct.height);
 		}
 		errors.push('direct JS decoder: format not supported');
 	} catch (e) {
